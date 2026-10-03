@@ -1,0 +1,12 @@
+# build / runtime
+relay-scan
+venv/
+www/
+scan.tsv*
+full.tsv
+*.log
+lib/*.ftz
+.og.html
+# local backups
+*.bak*
+*.bak-*

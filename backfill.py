@@ -98,9 +98,11 @@ def main():
     with open(os.path.join(outdir, "lang-cache.json.tmp"), "w") as f:
         json.dump({pk: l for pk, l in lang.items() if pk in everyone}, f)
     os.replace(os.path.join(outdir, "lang-cache.json.tmp"), os.path.join(outdir, "lang-cache.json"))
+    if not days:
+        raise SystemExit("backfill: no D rows in the scan (relay-scan was not run with 'full'?)")
     first, last = min(days), max(days)
     if start:
-        first = max(first, analyze.day_of(int(datetime.datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=analyze.TZ).timestamp())))
+        first = max(first, analyze.day_from_name(start))
     today = analyze.day_of(int(datetime.datetime.now().timestamp()))
     written = 0
     window = collections.deque()          # last 30 days of sets

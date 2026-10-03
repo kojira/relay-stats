@@ -12,7 +12,7 @@ def main(outdir):
     stats = json.load(open(os.path.join(outdir, "stats.json")))
     hist = []
     hdir = os.path.join(outdir, "history")
-    for name in sorted(os.listdir(hdir))[-120:]:
+    for name in sorted(n for n in os.listdir(hdir) if n.endswith(".json"))[-120:]:
         try:
             h = json.load(open(os.path.join(hdir, name)))
         except ValueError:
@@ -21,7 +21,7 @@ def main(outdir):
             continue
         hist.append({"date": name[:10], "active": {l: [h["active"][l][w]["total"] for w in ("dau", "wau", "mau")] for l in ("_all", "ja") if l in h["active"]}})
     tpl = open(os.path.join(HERE, "og-template.html"), encoding="utf-8").read()
-    html = tpl.replace("__RELAY_STATS_DATA__", json.dumps({"stats": stats, "history": hist}, ensure_ascii=False).replace("</", "<\\/"))
+    html = tpl.replace("__RELAY_STATS_DATA__", json.dumps({"stats": stats, "history": hist}, ensure_ascii=False).replace("<", "\\u003c"))
     tmp_html = os.path.join(outdir, ".og.html")
     with open(tmp_html, "w", encoding="utf-8") as f:
         f.write(html)

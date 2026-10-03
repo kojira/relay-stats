@@ -31,9 +31,10 @@ CONFIG = _load_config()
 try:
     from zoneinfo import ZoneInfo
     TZ = ZoneInfo(CONFIG["TIMEZONE"])
-except Exception:  # python < 3.9 or unknown name
-    TZ = datetime.timezone(datetime.timedelta(hours=9))
+except Exception as e:  # python < 3.9 or unknown name: fail loudly instead of silently using another zone
+    raise SystemExit(f"relay-stats: invalid TIMEZONE={CONFIG['TIMEZONE']!r} in relay-stats.conf ({e!r})")
 # Day boundaries use the zone's current UTC offset (DST shifts are ignored for simplicity).
+# Day number d = (ts + TZ_OFFSET) // DAY, i.e. the date is 1970-01-01 + d days (same as relay-scan).
 TZ_OFFSET = int(datetime.datetime.now(TZ).utcoffset().total_seconds())
 TZ_LABEL = CONFIG["TIMEZONE"]
 
@@ -42,8 +43,15 @@ def day_of(ts):
     return (ts + TZ_OFFSET) // DAY
 
 
+EPOCH_DATE = datetime.date(1970, 1, 1)
+
+
 def day_name(d):
-    return datetime.datetime.fromtimestamp(d * DAY - TZ_OFFSET, TZ).strftime("%Y-%m-%d")
+    return (EPOCH_DATE + datetime.timedelta(days=d)).isoformat()
+
+
+def day_from_name(name):
+    return (datetime.date.fromisoformat(name) - EPOCH_DATE).days
 # Kinds that do not indicate a human being active on this relay.
 NOT_ACTIVITY = {1059, 13, 10377}
 BOT_NIP05_SUFFIXES = ("nostrverse.eth.link",)
@@ -211,7 +219,7 @@ def render(s, outdir):
     """Inject stats + history into template.html (editable without touching code)."""
     hist = []
     hdir = os.path.join(outdir, "history")
-    for name in sorted(os.listdir(hdir)):
+    for name in sorted(n for n in os.listdir(hdir) if n.endswith(".json")):
         try:
             h = json.load(open(os.path.join(hdir, name)))
             if h.get("partial"):
@@ -222,7 +230,7 @@ def render(s, outdir):
         except Exception:
             pass
     tpl = open(os.environ.get("RELAY_STATS_TEMPLATE", os.path.join(HERE, "template.html")), encoding="utf-8").read()
-    data = json.dumps({"stats": s, "history": hist}, ensure_ascii=False).replace("</", "<\\/")
+    data = json.dumps({"stats": s, "history": hist}, ensure_ascii=False).replace("<", "\\u003c")
     html = (tpl.replace("__RELAY_STATS_DATA__", data).replace("__RELAY_NAME__", s["relay"])
                .replace("__OG_VERSION__", str(s.get("date", "")).replace("-", "")))   # changes daily -> SNS caches refresh
     tmp = os.path.join(outdir, "index.html.tmp")

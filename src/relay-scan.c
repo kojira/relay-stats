@@ -38,7 +38,7 @@ static int find_content(const char *s, size_t n, const char **o, size_t *ol) {
     const char *p = memmem(s, n, key, strlen(key));
     if (!p) return 0;
     p += strlen(key);
-    if (*p != '"') return 0;
+    if (p >= s + n || *p != '"') return 0;
     const char *q = p + 1, *end = s + n;
     while (q < end) { if (*q == '\\') q += 2; else if (*q == '"') break; else q++; }
     if (q >= end) return 0;
@@ -53,6 +53,17 @@ static int is_activity(uint64_t k) {
 }
 static int is_target_kind(uint64_t k) { return k == 7 || k == 6 || k == 16; }
 
+// shorten a JSON string literal prefix [co, co+*cl) so it doesn't end inside an escape sequence
+static void trunc_escape(const char *co, size_t *cl) {
+    size_t i = 1, last = 1;   // skip the opening quote; last = end of the last complete char/escape
+    while (i < *cl) {
+        size_t step = co[i] == '\\' ? (co[i+1] == 'u' ? 6 : 2) : 1;
+        if (i + step > *cl) break;
+        i += step; last = i;
+    }
+    *cl = last;
+}
+
 // simple open-addressing set of 32-byte pubkeys
 typedef struct { unsigned char (*k)[32]; char *used; uint32_t *cnt; size_t cap, n; } pkset;
 static size_t hsh(const unsigned char *p) { uint64_t x; memcpy(&x, p, 8); return (size_t)x; }
@@ -61,6 +72,7 @@ static uint32_t *ps_add(pkset *s, const unsigned char *p) {
     if ((s->n + 1) * 2 > s->cap) {
         pkset t = { 0 }; t.cap = s->cap ? s->cap * 2 : 1 << 16;
         t.k = calloc(t.cap, 32); t.used = calloc(t.cap, 1); t.cnt = calloc(t.cap, 4);
+        if (!t.k || !t.used || !t.cnt) { fprintf(stderr, "relay-scan: out of memory (set of %zu)\n", t.cap); exit(1); }
         for (size_t i = 0; i < s->cap; i++) if (s->used[i]) *ps_add(&t, s->k[i]) = s->cnt[i];
         free(s->k); free(s->used); free(s->cnt); *s = t;
     }
@@ -89,7 +101,14 @@ int main(int argc, char **argv) {
     uint64_t until = argc > 3 ? strtoull(argv[3], 0, 10) : UINT64_MAX;
     if (until == 0) until = UINT64_MAX;
     int full = argc > 4 && !strcmp(argv[4], "full");
-    int64_t tzoff = getenv("RELAY_STATS_TZ_OFFSET") ? atoll(getenv("RELAY_STATS_TZ_OFFSET")) : 32400; // day boundary: JST
+    int64_t tzoff = 32400; // day boundary default: JST
+    {
+        const char *e = getenv("RELAY_STATS_TZ_OFFSET"); char *endp;
+        if (e) {
+            tzoff = strtoll(e, &endp, 10);
+            if (!*e || *endp || tzoff < -50400 || tzoff > 50400) { fprintf(stderr, "relay-scan: bad RELAY_STATS_TZ_OFFSET '%s'\n", e); return 2; }
+        }
+    }
     unsigned TEXT_CAP = full ? 40 : 0xFFFF, TGT_CAP = full ? 300 : 0xFFFF;
     MDB_env *env; MDB_txn *txn;
     MDB_dbi dEv, dPl, dCa, dPk;
@@ -108,7 +127,8 @@ int main(int argc, char **argv) {
     MDB_stat st; mdb_stat(txn, dEv, &st);
     printf("S\ttotal_events\t%zu\n", st.ms_entries);
     MDB_envinfo ei; mdb_env_info(env, &ei);
-    printf("S\tdb_bytes_used\t%zu\n", (size_t)(ei.me_last_pgno + 1) * 4096);
+    MDB_stat es; mdb_env_stat(env, &es);   // page size is fixed when the DB is created (OS page size at that time)
+    printf("S\tdb_bytes_used\t%zu\n", (size_t)(ei.me_last_pgno + 1) * es.ms_psize);
     printf("S\tscan_since\t%llu\n", (unsigned long long)since);
 
     pkset authors = { 0 }, days = { 0 }, bridges = { 0 };
@@ -127,7 +147,7 @@ int main(int argc, char **argv) {
             size_t off = 88; \
             while (off + 2 <= (evv).mv_size) { \
                 unsigned char tn = b[off], tl = b[off+1]; \
-                if (tn == 'p' && tl == 32) { hex(b+off+2, 32, th); gc++; break; } \
+                if (tn == 'p' && tl == 32 && off + 2 + 32 <= (evv).mv_size) { hex(b+off+2, 32, th); gc++; break; } \
                 off += 2 + tl; \
             } \
         } \
@@ -146,7 +166,7 @@ int main(int argc, char **argv) {
             if ((kind == 0 || kind == 10002) && !ps_has(&bridges, b+32)) { \
                 MDB_val lk = { 8, (levp) }, pv; \
                 if (!mdb_get(txn, dPl, &lk, &pv) && pv.mv_size > 1 && ((char*)pv.mv_data)[0] == 0 && \
-                    memmem(pv.mv_data, pv.mv_size, "\"activitypub\"", 13) && memmem(pv.mv_data, pv.mv_size, "\"proxy\"", 7)) { \
+                    memmem(pv.mv_data, pv.mv_size, "[\"proxy\",\"", 10) && memmem(pv.mv_data, pv.mv_size, ",\"activitypub\"]", 15)) { \
                     ps_add(&bridges, b+32); printf("B\t%s\n", pkh); \
                 } \
             } \
@@ -164,8 +184,9 @@ int main(int argc, char **argv) {
             MDB_val lk = { 8, (levp) }, pv; const char *co; size_t cl; \
             if (!mdb_get(txn, dPl, &lk, &pv) && pv.mv_size > 1 && ((char*)pv.mv_data)[0] == 0 && \
                 find_content((char*)pv.mv_data + 1, pv.mv_size - 1, &co, &cl)) { \
-                if (cl > 1200) cl = 1200; \
-                printf("E\t%s\t%llu\t%llu\t%s\t%.*s%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, (int)cl, co, cl == 1200 ? "\"" : ""); \
+                int trunc = 0; \
+                if (cl > 1200) { cl = 1199; trunc = 1; trunc_escape(co, &cl); } \
+                printf("E\t%s\t%llu\t%llu\t%s\t%.*s%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, (int)cl, co, trunc ? "\"" : ""); \
                 printed = 1; tc++; \
             } \
         } \

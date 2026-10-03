@@ -10,3 +10,5 @@ lib/*.ftz
 # local backups
 *.bak*
 *.bak-*
+.lock/
+www.backfill/

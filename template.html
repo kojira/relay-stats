@@ -1,0 +1,439 @@
+<!doctype html>
+<!--
+  relay-stats landing page template.
+  Edit freely: analyze.py only replaces __RELAY_NAME__, __RELAY_STATS_DATA__ and __OG_VERSION__.
+  Apply edits immediately with:  ~/relay-stats/venv/bin/python ~/relay-stats/analyze.py --render ~/relay-stats/www
+  (strfry re-reads www/index.html when its mtime changes; no rebuild/restart needed)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__RELAY_NAME__ // nostr relay</title>
+<meta name="description" content="Live activity stats for the nostr relay wss://__RELAY_NAME__ — daily / weekly / monthly active users by language.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="__RELAY_NAME__">
+<meta property="og:title" content="__RELAY_NAME__ — nostr relay stats">
+<meta property="og:description" content="Daily / weekly / monthly active users by language on wss://__RELAY_NAME__">
+<meta property="og:url" content="https://__RELAY_NAME__/">
+<meta property="og:image" content="https://__RELAY_NAME__/assets/og.png?v=__OG_VERSION__">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="__RELAY_NAME__ — nostr relay stats">
+<meta name="twitter:image" content="https://__RELAY_NAME__/assets/og.png?v=__OG_VERSION__">
+<style>
+  :root {
+    --bg:#05070d; --panel:rgba(12,20,34,.72); --line:rgba(0,229,255,.16); --line2:rgba(0,229,255,.35);
+    --fg:#d8f6ff; --dim:#6f8aa3; --cyan:#00e5ff; --mag:#ff3df2; --amber:#ffb84d; --lime:#7dff9b;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  html { background:var(--bg); }
+  body {
+    margin:0; color:var(--fg); font-family:var(--mono); font-size:13px; letter-spacing:.02em;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(255,61,242,.10), transparent 60%),
+      radial-gradient(1000px 700px at 0% 0%, rgba(0,229,255,.12), transparent 55%),
+      linear-gradient(rgba(0,229,255,.035) 1px, transparent 1px) 0 0/100% 32px,
+      linear-gradient(90deg, rgba(0,229,255,.035) 1px, transparent 1px) 0 0/32px 100%,
+      var(--bg);
+    min-height:100vh;
+  }
+  body::after { /* scanlines */
+    content:""; position:fixed; inset:0; pointer-events:none;
+    background:repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 1px, transparent 1px 3px);
+  }
+  main { max-width:1180px; margin:0 auto; padding:32px 24px 48px; }
+  header { display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; margin-bottom:24px; }
+  h1 {
+    margin:0; font-size:30px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    background:linear-gradient(90deg, var(--cyan), #9af6ff 40%, var(--mag)); -webkit-background-clip:text; background-clip:text; color:transparent;
+    filter:drop-shadow(0 0 12px rgba(0,229,255,.35));
+  }
+  .tag { color:var(--dim); font-size:12px; margin-top:6px; }
+  .tag code { color:var(--cyan); background:rgba(0,229,255,.08); border:1px solid var(--line); padding:2px 8px; border-radius:3px; }
+  .status { text-align:right; font-size:11px; color:var(--dim); line-height:1.7; text-transform:uppercase; letter-spacing:.12em; }
+  .live { color:var(--lime); }
+  .live::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--lime); margin-right:6px;
+    box-shadow:0 0 8px var(--lime); animation:pulse 1.6s infinite; vertical-align:1px; }
+  @keyframes pulse { 50% { opacity:.25; } }
+
+  .panel {
+    position:relative; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:18px 20px;
+    backdrop-filter:blur(6px); box-shadow:0 0 0 1px rgba(0,0,0,.4) inset, 0 10px 40px rgba(0,0,0,.35);
+  }
+  .panel::before, .panel::after { /* HUD corners */
+    content:""; position:absolute; width:14px; height:14px; border:2px solid var(--cyan); opacity:.8; pointer-events:none;
+  }
+  .panel::before { top:-1px; left:-1px; border-right:0; border-bottom:0; }
+  .panel::after { bottom:-1px; right:-1px; border-left:0; border-top:0; }
+  h2 { margin:0 0 14px; font-size:12px; font-weight:600; letter-spacing:.22em; text-transform:uppercase; color:var(--cyan);
+       display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  h2::before { content:"▍"; color:var(--mag); }
+  h2 .meta { color:var(--dim); letter-spacing:.08em; font-weight:400; }
+  section { margin-top:22px; }
+
+  .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:14px; }
+  .card { padding:16px 18px; }
+  .card .v { font-size:26px; font-weight:700; color:#fff; text-shadow:0 0 14px rgba(0,229,255,.45); white-space:nowrap; }
+  .card .v small { font-size:15px; color:var(--dim); text-shadow:none; }
+  .card .k { margin-top:6px; color:var(--dim); font-size:10.5px; letter-spacing:.18em; text-transform:uppercase; }
+  .card.hl .v { color:var(--cyan); }
+
+  .wrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; font-variant-numeric:tabular-nums; }
+  th, td { padding:7px 10px; text-align:right; white-space:nowrap; border-bottom:1px solid rgba(0,229,255,.07); }
+  thead th { color:var(--dim); font-weight:400; font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; }
+  thead tr:first-child th { color:var(--cyan); border-bottom:1px solid var(--line2); }
+  tbody th { text-align:left; font-weight:400; color:#bfe9f5; }
+  td.n { font-weight:700; color:#fff; border-left:1px solid var(--line); }
+  td.s { color:var(--dim); }
+  tbody tr:hover { background:rgba(0,229,255,.06); }
+  tr.ja { background:linear-gradient(90deg, rgba(0,229,255,.16), rgba(0,229,255,.03)); }
+  tr.ja th { color:var(--cyan); }
+  tr.tot { background:rgba(255,255,255,.04); } tr.tot th, tr.tot td { font-weight:700; color:#fff; border-top:1px solid var(--line2); }
+  tr.br th, tr.br td { color:#7d6a94; font-style:italic; }
+
+  .seg { display:inline-flex; border:1px solid var(--line2); border-radius:4px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--dim); border:0; border-right:1px solid var(--line); padding:5px 11px;
+                font:inherit; font-size:11px; letter-spacing:.12em; text-transform:uppercase; cursor:pointer; }
+  .seg button:last-child { border-right:0; }
+  .seg button:hover { color:var(--fg); background:rgba(0,229,255,.06); }
+  .seg button.on { color:#001018; background:var(--cyan); box-shadow:0 0 14px rgba(0,229,255,.5); }
+  .ctl { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .ctl .range { display:flex; gap:6px; align-items:center; color:var(--dim); }
+  input[type=date] { background:rgba(0,229,255,.05); color:var(--fg); border:1px solid var(--line2); border-radius:4px; padding:4px 8px;
+                     font:inherit; font-size:11px; color-scheme:dark; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .chip { display:inline-flex; align-items:center; gap:7px; padding:4px 10px; border:1px solid var(--line); border-radius:999px; cursor:pointer;
+          color:var(--dim); font-size:11px; user-select:none; transition:.15s; }
+  .chip i { width:9px; height:9px; border-radius:50%; background:currentColor; opacity:.35; }
+  .chip.on { color:var(--c); border-color:var(--c); box-shadow:0 0 10px -2px var(--c); background:rgba(255,255,255,.02); }
+  .chip.on i { opacity:1; box-shadow:0 0 8px var(--c); }
+  .spacer { flex:1; }
+  a.btn { color:var(--dim); text-decoration:none; border:1px solid var(--line); padding:4px 10px; border-radius:4px; font-size:11px; letter-spacing:.12em; }
+  a.btn:hover { color:var(--cyan); border-color:var(--cyan); }
+
+  .chartbox { position:relative; }
+  canvas { display:block; width:100%; height:380px; }
+  #tip { position:absolute; pointer-events:none; display:none; min-width:170px; padding:10px 12px; font-size:11.5px; line-height:1.7;
+         background:rgba(4,10,20,.92); border:1px solid var(--cyan); border-radius:4px; box-shadow:0 0 18px rgba(0,229,255,.35); }
+  #tip b { color:var(--cyan); letter-spacing:.1em; }
+  #tip .row { display:flex; justify-content:space-between; gap:16px; }
+  #tip .row span:last-child { color:#fff; font-weight:700; }
+
+  .note { color:var(--dim); font-size:11.5px; line-height:1.9; }
+  .note li { margin-left:-8px; }
+  .note a { color:var(--cyan); }
+  footer { margin-top:24px; text-align:center; color:#3c5568; font-size:10px; letter-spacing:.3em; text-transform:uppercase; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>__RELAY_NAME__</h1>
+      <div class="tag">NOSTR RELAY &nbsp;<code>wss://__RELAY_NAME__</code></div>
+    </div>
+    <div class="status"><span class="live">online</span><br>updated <span id="updated"></span><br>refresh every 1h · tz <span id="tz"></span></div>
+  </header>
+
+  <div class="cards">
+    <div class="panel card"><div class="v" id="c-total"></div><div class="k">Stored events</div></div>
+    <div class="panel card"><div class="v" id="c-size"></div><div class="k">Database size</div></div>
+    <div class="panel card"><div class="v" id="c-ev30"></div><div class="k">Events · last 30d</div></div>
+    <div class="panel card"><div class="v" id="c-mau"></div><div class="k">MAU · all languages</div></div>
+    <div class="panel card hl"><div class="v" id="c-ja"></div><div class="k">Japanese DAU / MAU</div></div>
+  </div>
+
+  <section class="panel">
+    <h2>Active users by language <span class="meta" id="day"></span>
+      <span class="seg" id="which"><button data-v="done" class="on">Last full day</button><button data-v="today">Today (partial)</button></span>
+    </h2>
+    <div class="wrap"><table>
+      <thead>
+        <tr><th></th><th colspan="4" style="text-align:center">DAU · day</th><th colspan="4" style="text-align:center">WAU · 7 days</th><th colspan="4" style="text-align:center">MAU · 30 days</th></tr>
+        <tr><th>Language</th>
+          <th>Total</th><th>NIP-05</th><th>Profile</th><th>No kind0</th>
+          <th>Total</th><th>NIP-05</th><th>Profile</th><th>No kind0</th>
+          <th>Total</th><th>NIP-05</th><th>Profile</th><th>No kind0</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+
+  <section class="panel">
+    <h2>Trend <span class="meta" id="rangeinfo"></span></h2>
+    <div class="ctl">
+      <span class="seg" id="metric"><button data-v="dau" class="on">DAU</button><button data-v="wau">WAU</button><button data-v="mau">MAU</button></span>
+      <span class="seg" id="presets">
+        <button data-d="30">30D</button><button data-d="90">90D</button><button data-d="180">6M</button>
+        <button data-d="365">1Y</button><button data-d="730">2Y</button><button data-d="0">All</button>
+      </span>
+      <span class="range"><input type="date" id="from"> → <input type="date" id="to"></span>
+      <span class="spacer"></span>
+      <span class="seg" id="smooth"><button data-v="0" class="on">Raw</button><button data-v="7">7D avg</button></span>
+      <span class="seg" id="scale"><button data-v="clip" class="on">Auto</button><button data-v="lin">Full</button><button data-v="log">Log</button></span>
+      <a href="#" class="btn" id="csv">CSV ↓</a>
+    </div>
+    <div class="chips" id="langsel"></div>
+    <div class="chartbox"><canvas id="chart"></canvas><div id="tip"></div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Methodology</h2>
+    <ul class="note" id="note"></ul>
+  </section>
+  <footer>relay-stats · generated from strfry LMDB</footer>
+</main>
+
+<script id="data" type="application/json">__RELAY_STATS_DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const S = D.stats, H = D.history;
+const TOP = 12;                                   // languages listed in the table (plus unknown)
+const DEFAULT_SERIES = ['_all', 'ja', 'en'];
+const NAMES = { ja:'Japanese', en:'English', es:'Spanish', pt:'Portuguese', fr:'French', de:'German', it:'Italian',
+  zh:'Chinese', ko:'Korean', ru:'Russian', nl:'Dutch', pl:'Polish', hu:'Hungarian', ca:'Catalan', tr:'Turkish',
+  id:'Indonesian', th:'Thai', vi:'Vietnamese', ar:'Arabic', fa:'Persian', uk:'Ukrainian', sv:'Swedish', cs:'Czech',
+  unknown:'Unknown', _all:'Total', _bridge:'Fediverse bridge (separate)' };
+const PALETTE = { _all:'#e8fbff', ja:'#00e5ff', en:'#ffb84d', _bridge:'#a77bff', unknown:'#5f7d91' };
+const EXTRA = ['#ff3df2', '#7dff9b', '#ff5c7a', '#ffe14d', '#4d9bff', '#c2ff4d'];
+const fmt = n => (n ?? 0).toLocaleString('en-US');
+const $ = id => document.getElementById(id);
+const name = l => NAMES[l] || l;
+
+// ---- header / cards -----------------------------------------------------------
+$('updated').textContent = new Date(S.generated_at * 1000).toLocaleString('sv-SE', { timeZone: S.timezone }).slice(0, 16);
+$('tz').textContent = S.timezone;
+$('c-total').textContent = fmt(S.db.total_events);
+$('c-size').innerHTML = (S.db.bytes_used / 1e9).toFixed(1) + ' <small>GB</small>';
+$('c-ev30').textContent = fmt(S.db.events_30d);
+$('c-mau').textContent = fmt(S.active._all?.mau.total);
+$('c-ja').innerHTML = `${fmt(S.active.ja?.dau.total)} <small>/</small> ${fmt(S.active.ja?.mau.total)}`;
+
+function seg(id, cb) {
+  const el = $(id);
+  el.querySelectorAll('button').forEach(b => b.onclick = () => {
+    el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); cb(b);
+  });
+}
+
+// ---- table --------------------------------------------------------------------
+function table(active) {
+  const langs = Object.keys(active).filter(l => !['_all', 'unknown', '_bridge'].includes(l)).slice(0, TOP);
+  if (active.unknown) langs.push('unknown');
+  langs.push('_all');
+  if (active._bridge) langs.push('_bridge');
+  $('rows').innerHTML = langs.map(l => {
+    const r = active[l];
+    const cls = l === '_all' ? 'tot' : l === '_bridge' ? 'br' : (l === 'ja' ? 'ja' : '');
+    const cells = ['dau', 'wau', 'mau'].map(w =>
+      `<td class="n">${fmt(r[w].total)}</td><td class="s">${fmt(r[w].nip05)}</td><td class="s">${fmt(r[w].profile_only)}</td><td class="s">${fmt(r[w].no_profile)}</td>`).join('');
+    return `<tr class="${cls}"><th>${name(l)}</th>${cells}</tr>`;
+  }).join('');
+}
+function show(which) {
+  const today = which === 'today' && S.today;
+  table(today ? S.today.active : S.active);
+  $('day').textContent = today ? `${S.today.date} · in progress` : `${S.date} · ${S.timezone}`;
+}
+seg('which', b => show(b.dataset.v));
+show('done');
+
+// ---- trend chart --------------------------------------------------------------
+const allSeries = ['_all', 'ja', 'en',
+  ...Object.keys(S.active).filter(l => !['_all', 'ja', 'en', 'unknown', '_bridge'].includes(l)).slice(0, 6), 'unknown', '_bridge']
+  .filter(l => H.some(h => h.active[l]));
+let ex = 0;
+const COLOR = Object.fromEntries(allSeries.map(l => [l, PALETTE[l] || EXTRA[ex++ % EXTRA.length]]));
+const st = { metric: 'dau', from: '', to: '', smooth: 0, log: false, clip: true, on: new Set(DEFAULT_SERIES) };
+const firstDate = H.length ? H[0].date : '', lastDate = H.length ? H[H.length - 1].date : '';
+$('from').min = $('to').min = firstDate; $('from').max = $('to').max = lastDate;
+
+$('langsel').innerHTML = allSeries.map(l =>
+  `<span class="chip ${st.on.has(l) ? 'on' : ''}" data-l="${l}" style="--c:${COLOR[l]}"><i></i>${name(l)}</span>`).join('');
+$('langsel').querySelectorAll('.chip').forEach(c => c.onclick = () => {
+  const l = c.dataset.l; st.on.has(l) ? st.on.delete(l) : st.on.add(l); c.classList.toggle('on'); draw();
+});
+
+function setRange(days) {
+  st.to = lastDate;
+  if (!days) st.from = firstDate;
+  else { const d = new Date(lastDate + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - days + 1); st.from = d.toISOString().slice(0, 10); if (st.from < firstDate) st.from = firstDate; }
+  $('from').value = st.from; $('to').value = st.to;
+  draw();
+}
+seg('presets', b => setRange(+b.dataset.d));
+const clearPreset = () => $('presets').querySelectorAll('button').forEach(b => b.classList.remove('on'));
+$('from').onchange = e => { st.from = e.target.value || firstDate; clearPreset(); draw(); };
+$('to').onchange = e => { st.to = e.target.value || lastDate; clearPreset(); draw(); };
+seg('metric', b => { st.metric = b.dataset.v; draw(); });
+seg('smooth', b => { st.smooth = +b.dataset.v; draw(); });
+seg('scale', b => { st.log = b.dataset.v === 'log'; st.clip = b.dataset.v === 'clip'; draw(); });
+
+const idxOf = () => ({ dau: 0, wau: 1, mau: 2 }[st.metric]);
+const raw = (h, l) => h.active[l]?.[idxOf()] ?? 0;
+let view = [], series = {}, geo = null;
+
+function compute() {
+  const lo = H.findIndex(h => h.date >= st.from), hiR = H.map(h => h.date <= st.to).lastIndexOf(true);
+  view = lo < 0 || hiR < lo ? [] : H.slice(lo, hiR + 1);
+  series = {};
+  for (const l of allSeries) {
+    if (!st.on.has(l)) continue;
+    if (!st.smooth) { series[l] = view.map(h => raw(h, l)); continue; }
+    const out = [];
+    for (let j = 0; j < view.length; j++) {               // trailing average, uses days before the window too
+      const gi = lo + j; let sum = 0, n = 0;
+      for (let k = Math.max(0, gi - st.smooth + 1); k <= gi; k++) { sum += raw(H[k], l); n++; }
+      out.push(sum / n);
+    }
+    series[l] = out;
+  }
+}
+
+function niceTicks(max, n) {
+  const step0 = max / n, mag = Math.pow(10, Math.floor(Math.log10(step0))), r = step0 / mag;
+  const step = (r < 1.5 ? 1 : r < 3 ? 2 : r < 7 ? 5 : 10) * mag;
+  const t = []; for (let v = 0; v <= max + 1e-9; v += step) t.push(v);
+  return t;
+}
+const short = v => v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + 'k' : String(Math.round(v));
+
+function draw(hover = -1) {
+  const c = $('chart'), dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, Hh = c.clientHeight;
+  if (c.width !== W * dpr || c.height !== Hh * dpr) { c.width = W * dpr; c.height = Hh * dpr; }
+  const x = c.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W, Hh);
+  x.font = '11px ' + getComputedStyle(document.body).fontFamily;
+  if (hover < 0) compute();
+  const P = { l: 56, r: 18, t: 26, b: 34 };
+  const keys = Object.keys(series);
+  if (view.length < 2 || !keys.length) {
+    x.fillStyle = '#6f8aa3'; x.fillText(view.length < 2 ? 'NO DATA IN RANGE' : 'SELECT A SERIES', P.l, Hh / 2);
+    $('rangeinfo').textContent = ''; geo = null; return;
+  }
+  // y-axis: ignore isolated spikes (> 2.5x the 99th percentile) so the normal range stays readable
+  const all = keys.flatMap(l => series[l]).sort((a, b) => a - b);
+  const p95 = all[Math.floor(all.length * .95)] || 1, peak = all[all.length - 1] || 1;
+  const keep = all.filter(v => v <= p95 * 3);
+  const clip = !st.log && st.clip && peak > p95 * 3;
+  let max = Math.max(1, clip ? keep[keep.length - 1] * 1.1 : peak);
+  const ticks = st.log ? (() => { const t = []; for (let v = 1; v <= max * 10; v *= 10) t.push(v); max = t[t.length - 1]; return t; })()
+                       : niceTicks(max * 1.08, 5);
+  if (!st.log) max = ticks[ticks.length - 1];
+  const iw = W - P.l - P.r, ih = Hh - P.t - P.b;
+  const X = j => P.l + j * iw / (view.length - 1);
+  const Y = v => st.log ? P.t + ih - Math.log10(Math.max(1, v)) / Math.log10(max) * ih : P.t + ih - Math.min(v, max) / max * ih;
+  geo = { P, iw, X };
+
+  // grid
+  x.lineWidth = 1;
+  ticks.forEach(v => {
+    const y = Math.round(Y(v)) + .5;
+    x.strokeStyle = 'rgba(0,229,255,.08)'; x.beginPath(); x.moveTo(P.l, y); x.lineTo(W - P.r, y); x.stroke();
+    x.fillStyle = '#6f8aa3'; x.textAlign = 'right'; x.fillText(short(v), P.l - 8, y + 4);
+  });
+  const nt = Math.max(2, Math.min(8, Math.floor(iw / 120)));
+  x.textAlign = 'center';
+  for (let t = 0; t <= nt; t++) {
+    const j = Math.round(t * (view.length - 1) / nt), px = X(j);
+    x.strokeStyle = 'rgba(0,229,255,.05)'; x.beginPath(); x.moveTo(px, P.t); x.lineTo(px, P.t + ih); x.stroke();
+    x.fillStyle = '#6f8aa3';
+    x.fillText(view.length > 400 ? view[j].date.slice(0, 7) : view[j].date.slice(2), Math.min(Math.max(px, P.l + 30), W - P.r - 30), Hh - 12);
+  }
+  x.textAlign = 'left';
+
+  // series: area glow for the first, then lines (draw Total last so it's on top)
+  const order = keys.filter(l => l !== '_all').concat(keys.includes('_all') ? ['_all'] : []);
+  order.forEach(l => {
+    const ys = series[l], col = COLOR[l];
+    x.beginPath(); ys.forEach((v, j) => j ? x.lineTo(X(j), Y(v)) : x.moveTo(X(j), Y(v)));
+    if (l === 'ja' || (order.length === 1)) {     // filled area for the focus series
+      const g = x.createLinearGradient(0, P.t, 0, P.t + ih); g.addColorStop(0, col + '55'); g.addColorStop(1, col + '00');
+      x.save(); x.lineTo(X(ys.length - 1), P.t + ih); x.lineTo(X(0), P.t + ih); x.closePath(); x.fillStyle = g; x.fill(); x.restore();
+      x.beginPath(); ys.forEach((v, j) => j ? x.lineTo(X(j), Y(v)) : x.moveTo(X(j), Y(v)));
+    }
+    x.save(); x.strokeStyle = col; x.lineWidth = view.length > 500 ? 1.2 : 1.8; x.lineJoin = 'round';
+    x.shadowColor = col; x.shadowBlur = 8; x.stroke(); x.restore();
+  });
+
+  // clipped spikes: mark with a triangle + value at the top edge
+  if (clip) {
+    x.save(); x.beginPath(); x.rect(P.l, 0, iw, Hh); x.clip();
+    let lastLabel = -1e9;
+    order.forEach(l => series[l].forEach((v, j) => {
+      if (v <= max) return;
+      const px = X(j);
+      x.fillStyle = COLOR[l]; x.beginPath(); x.moveTo(px, P.t - 2); x.lineTo(px - 5, P.t + 7); x.lineTo(px + 5, P.t + 7); x.closePath(); x.fill();
+      if (px - lastLabel > 60) {
+        x.fillStyle = '#ff3df2'; x.textAlign = 'left'; x.fillText('▲ ' + short(v), Math.min(px + 8, W - P.r - 50), P.t + 6); lastLabel = px;
+      }
+    }));
+    x.restore();
+  }
+
+  // crosshair
+  if (hover >= 0) {
+    const px = X(hover);
+    x.strokeStyle = 'rgba(0,229,255,.6)'; x.setLineDash([3, 3]); x.beginPath(); x.moveTo(px, P.t); x.lineTo(px, P.t + ih); x.stroke(); x.setLineDash([]);
+    order.forEach(l => {
+      const y = Y(series[l][hover]);
+      x.fillStyle = '#05070d'; x.strokeStyle = COLOR[l]; x.lineWidth = 2;
+      x.beginPath(); x.arc(px, y, 3.5, 0, 7); x.fill(); x.stroke();
+    });
+  }
+  $('rangeinfo').textContent = `${st.metric.toUpperCase()}${st.smooth ? ' · 7-day avg' : ''} · ${view[0].date} → ${view[view.length - 1].date} · ${fmt(view.length)} days`;
+}
+
+$('chart').addEventListener('mousemove', e => {
+  if (!geo || view.length < 2) return;
+  const r = $('chart').getBoundingClientRect(), mx = e.clientX - r.left;
+  const j = Math.max(0, Math.min(view.length - 1, Math.round((mx - geo.P.l) / geo.iw * (view.length - 1))));
+  draw(j);
+  const tip = $('tip');
+  const keys = Object.keys(series).sort((a, b) => series[b][j] - series[a][j]);
+  tip.innerHTML = `<b>${view[j].date}</b>` + keys.map(l =>
+    `<div class="row"><span style="color:${COLOR[l]}">● ${name(l)}</span><span>${fmt(Math.round(series[l][j]))}</span></div>`).join('');
+  tip.style.display = 'block';
+  const px = geo.X(j), tw = tip.offsetWidth;
+  tip.style.left = (px + 16 + tw > r.width ? px - 16 - tw : px + 16) + 'px';
+  tip.style.top = '20px';
+});
+$('chart').addEventListener('mouseleave', () => { $('tip').style.display = 'none'; draw(-1); });
+window.addEventListener('resize', () => draw());
+
+$('csv').onclick = e => {
+  e.preventDefault();
+  const rows = [['date', ...allSeries.flatMap(l => ['dau', 'wau', 'mau'].map(w => `${l}_${w}`))]];
+  view.forEach(h => rows.push([h.date, ...allSeries.flatMap(l => [0, 1, 2].map(i => h.active[l]?.[i] ?? 0))]));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' }));
+  a.download = `${S.relay}-${view[0]?.date}_${view[view.length - 1]?.date}.csv`; a.click();
+};
+
+$('presets').querySelector('[data-d="365"]').classList.add('on');
+setRange(365);
+
+// ---- notes --------------------------------------------------------------------
+const m = S.language_method, exl = S.excluded;
+$('note').innerHTML = [
+  `<b>DAU</b> = distinct pubkeys that wrote at least one event on that calendar day (${S.timezone}). <b>WAU / MAU</b> = distinct pubkeys over the 7 / 30 days ending that day. Counted directly from this relay's LMDB.`,
+  'Past days are recomputed from events still stored here; deleted or replaced events can no longer be seen, so history is a slight undercount. Language and profile class use the current data.',
+  'Fediverse bridge accounts (Mostr / momostr: <code>proxy … activitypub</code>, NIP-05 <code>*.mostr.pub</code> / <code>momostr.pink</code>, label <code>pink.momostr</code>) are excluded from Total and languages and shown separately.',
+  'Not counted as activity: ephemeral kinds (20000–29999), gift wraps (1059 / 13, throwaway keys) and kind 10377.',
+  `Excluded: ${fmt(exl.banned_pubkeys)} banned pubkeys and ${fmt(exl.bot_nip05_accounts)} bot accounts (NIP-05 <code>*.nostrverse.eth.link</code>).`,
+  `Language detection (fastText lid.176): own notes ${fmt(m.from_own_text)}, profile text ${fmt(m.from_profile)}, inferred from reactions / reposts ${fmt(m.inferred_from_reactions)}.`,
+  '<b>NIP-05</b> = profile has a NIP-05 field (not verified). <b>Profile</b> = kind 0 stored here without NIP-05. <b>No kind0</b> = no profile stored on this relay.',
+  'Raw numbers: <a href="#" onclick="dl();return false">download JSON</a>'
+].map(s => `<li>${s}</li>`).join('');
+function dl() {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 1)], { type: 'application/json' }));
+  a.download = `${S.relay}-stats.json`; a.click();
+}
+</script>
+</body>
+</html>

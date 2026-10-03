@@ -1,0 +1,16 @@
+#!/bin/bash
+# relay-stats/run.sh — one collection pass: direct LMDB scan -> analyze -> www/index.html
+# usage: run.sh <relay-name> <strfry-db-dir> [banlist]
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+RELAY="$1"; DB="$2"; BAN="${3:-}"
+SINCE=$(( $(date +%s) - 32*86400 ))
+TMP="$HERE/scan.tsv"
+export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}"
+export RELAY_STATS_TZ_OFFSET="$("$HERE/venv/bin/python" "$HERE/tzoffset.py")"
+nice -n 10 "$HERE/relay-scan" "$DB" "$SINCE" > "$TMP.new"
+mv "$TMP.new" "$TMP"
+nice -n 10 "$HERE/venv/bin/python" "$HERE/analyze.py" "$RELAY" "$TMP" "$HERE/www" $BAN
+# OG image (www/assets/og.png); failure must not break the stats update
+nice -n 10 "$HERE/venv/bin/python" "$HERE/og.py" "$HERE/www" || echo "$(date '+%F %T') og.png render failed" >&2
+echo "$(date '+%F %T') ok $(grep -c '^E' "$TMP") events"

@@ -1,0 +1,80 @@
+<!doctype html>
+<!-- OG image (1200x630) template. og.py replaces __RELAY_STATS_DATA__ and screenshots it with headless Chrome. -->
+<html><head><meta charset="utf-8"><style>
+  :root { --cyan:#00e5ff; --mag:#ff3df2; --amber:#ffb84d; --dim:#6f8aa3; }
+  * { box-sizing:border-box; margin:0; }
+  html, body { width:1200px; height:630px; overflow:hidden; }
+  body {
+    font-family:"SF Mono","JetBrains Mono",Menlo,monospace; color:#d8f6ff;
+    background:
+      radial-gradient(900px 500px at 90% -10%, rgba(255,61,242,.22), transparent 60%),
+      radial-gradient(800px 600px at -10% 10%, rgba(0,229,255,.22), transparent 55%),
+      linear-gradient(rgba(0,229,255,.06) 1px, transparent 1px) 0 0/100% 30px,
+      linear-gradient(90deg, rgba(0,229,255,.06) 1px, transparent 1px) 0 0/30px 100%,
+      #05070d;
+    padding:56px 64px; position:relative;
+  }
+  body::after { content:""; position:absolute; inset:0; background:repeating-linear-gradient(0deg, rgba(255,255,255,.025) 0 1px, transparent 1px 3px); }
+  .frame { position:absolute; inset:24px; border:1px solid rgba(0,229,255,.22); }
+  .frame::before, .frame::after { content:""; position:absolute; width:34px; height:34px; border:3px solid var(--cyan); }
+  .frame::before { top:-2px; left:-2px; border-right:0; border-bottom:0; }
+  .frame::after { bottom:-2px; right:-2px; border-left:0; border-top:0; }
+  .top { display:flex; justify-content:space-between; align-items:flex-start; }
+  h1 { font-size:64px; letter-spacing:.06em; text-transform:uppercase; font-weight:800;
+       background:linear-gradient(90deg, var(--cyan), #a8f7ff 45%, var(--mag)); -webkit-background-clip:text; color:transparent;
+       filter:drop-shadow(0 0 18px rgba(0,229,255,.45)); }
+  .sub { margin-top:8px; font-size:20px; letter-spacing:.24em; color:var(--dim); text-transform:uppercase; }
+  .live { font-size:16px; letter-spacing:.24em; color:#7dff9b; text-transform:uppercase; margin-top:14px; text-align:right; }
+  .live::before { content:"●"; margin-right:8px; text-shadow:0 0 10px #7dff9b; }
+  .date { font-size:15px; color:var(--dim); letter-spacing:.14em; text-align:right; margin-top:6px; }
+  .stats { display:flex; gap:22px; margin-top:44px; }
+  .s { flex:1; padding:18px 22px; background:rgba(12,20,34,.75); border:1px solid rgba(0,229,255,.22); border-left:3px solid var(--c, var(--cyan)); }
+  .s .v { font-size:50px; font-weight:800; color:#fff; text-shadow:0 0 18px var(--c, rgba(0,229,255,.6)); line-height:1.1; }
+  .s .v small { font-size:26px; color:var(--dim); text-shadow:none; }
+  .s .k { margin-top:8px; font-size:15px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase; }
+  canvas { position:absolute; left:64px; right:64px; bottom:52px; width:1072px; height:150px; }
+  .cap { position:absolute; left:64px; bottom:208px; font-size:14px; letter-spacing:.22em; color:var(--dim); text-transform:uppercase; }
+  .cap b { color:var(--cyan); font-weight:600; } .cap i { color:#e8fbff; font-style:normal; }
+</style></head><body>
+<div class="frame"></div>
+<div class="top">
+  <div><h1 id="name"></h1><div class="sub">nostr relay · activity stats</div></div>
+  <div><div class="live">online</div><div class="date" id="date"></div></div>
+</div>
+<div class="stats">
+  <div class="s" style="--c:#00e5ff"><div class="v" id="ja"></div><div class="k">Japanese DAU / MAU</div></div>
+  <div class="s" style="--c:#e8fbff"><div class="v" id="mau"></div><div class="k">MAU · all languages</div></div>
+  <div class="s" style="--c:#ff3df2"><div class="v" id="ev"></div><div class="k">Stored events</div></div>
+</div>
+<div class="cap"><b>━ Japanese</b> &nbsp; <i>━ Total</i> &nbsp; DAU · last 90 days (7-day avg)</div>
+<canvas id="c" width="2144" height="300"></canvas>
+<script id="data" type="application/json">__RELAY_STATS_DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent), S = D.stats, H = D.history;
+const fmt = n => (n ?? 0).toLocaleString('en-US');
+const short = v => v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e4 ? Math.round(v / 1e3) + 'k' : fmt(v);
+document.getElementById('name').textContent = S.relay;
+document.getElementById('date').textContent = S.date + ' · ' + S.timezone;
+document.getElementById('ja').innerHTML = `${fmt(S.active.ja?.dau.total)}<small> / </small>${fmt(S.active.ja?.mau.total)}`;
+document.getElementById('mau').textContent = fmt(S.active._all?.mau.total);
+document.getElementById('ev').textContent = short(S.db.total_events);
+
+const c = document.getElementById('c'), x = c.getContext('2d'), W = c.width, Hh = c.height;
+const N = 90, SM = 7, src = H.slice(-(N + SM - 1));
+const avg = l => src.slice(SM - 1).map((_, j) => { let s = 0; for (let k = 0; k < SM; k++) s += src[j + k].active[l]?.[0] ?? 0; return s / SM; });
+const draw = (ys, max, col, fill) => {
+  if (ys.length < 2) return;
+  const X = j => j * W / (ys.length - 1), Y = v => Hh - 6 - v / max * (Hh - 16);
+  x.beginPath(); ys.forEach((v, j) => j ? x.lineTo(X(j), Y(v)) : x.moveTo(X(j), Y(v)));
+  if (fill) {
+    x.save(); x.lineTo(W, Hh); x.lineTo(0, Hh); x.closePath();
+    const g = x.createLinearGradient(0, 0, 0, Hh); g.addColorStop(0, col + '66'); g.addColorStop(1, col + '00');
+    x.fillStyle = g; x.fill(); x.restore();
+    x.beginPath(); ys.forEach((v, j) => j ? x.lineTo(X(j), Y(v)) : x.moveTo(X(j), Y(v)));
+  }
+  x.strokeStyle = col; x.lineWidth = 5; x.lineJoin = 'round'; x.shadowColor = col; x.shadowBlur = 16; x.stroke(); x.shadowBlur = 0;
+};
+const tot = avg('_all'), ja = avg('ja');
+draw(tot, Math.max(...tot, 1) * 1.05, '#e8fbff', false);
+draw(ja, Math.max(...ja, 1) * 1.15, '#00e5ff', true);   // own scale so the Japanese trend is visible
+</script></body></html>

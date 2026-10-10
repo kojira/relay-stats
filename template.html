@@ -443,7 +443,7 @@ setRange(365);
   const hourLabel = t => new Date(t * 1000).toLocaleString('sv-SE', { timeZone: tz }).slice(0, 13) + 'h';
   const daysIn = ym => new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7), 0)).getUTCDate();
   const SETS = {
-    hourly: E.hourly.map(r => ({ k: hourLabel(r[0]), ev: r[1], acc: r[2], src: r[3], full: true })),
+    hourly: E.hourly.map(r => ({ k: hourLabel(r[0]), ev: r[1], acc: r[2], src: r[3], full: r[0] + 3600 <= E.generated_at })),   // current hour = in progress
     daily: E.daily.map(r => ({ k: r[0], ev: r[1], acc: r[2], src: r[3], full: r[4] >= 24 })),
     monthly: E.monthly.map(r => ({ k: r[0], ev: r[1], acc: r[2], src: r[3], full: r[4] >= daysIn(r[0]) * 24 })),
   };

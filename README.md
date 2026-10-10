@@ -36,6 +36,15 @@ nostrfy の LMDB は `src/nostrfy-scan.c` で読む（出力は relay-scan と�
 - `events_30d` / `kinds_30d` は実際には走査窓（32日）の件数。`inferred_from_reactions` には lang-cache（過去の言語判定）由来も含む。
 - TIMEZONE の現在の UTC オフセットで日を区切る（夏時間の切り替えは無視）。不正な TIMEZONE はエラーで止まる。
 
+## 言語判定
+アカウントごとに 自分の投稿 → プロフィール（name / display_name / about）→ 反応・返信した相手の多数決 → 全期間の再計算結果 の順で決める。
+- 漢字・かなを含む文は文字の種類で決める（fastText lid.176 は漢字だけの中国語を ja と判定しがちなため）。ひらがな1文字以上かカタカナ2文字以上 → ja。漢字だけの文は简体字・繁体字専用字・中国語の助詞（zh）と日本の新字体・々（ja）で決め、どちらもなければ判定に使わない。
+- それ以外の文は fastText（確からしさ 0.5 以上）。
+
+## 言語別アカウント一覧
+`https://<relay>/#accounts=<lang>`（日別は `&day=YYYY-MM-DD`）。MAU / その日の DAU に数えたアカウントを、kind 0・最新の kind 1・言語の決め方つきで並べる。言語判定の確認用。
+データは analyze.py が毎時 `www/assets/accounts.json`（言語別の人数・日別人数）と `www/assets/accounts-<lang>.json` に書く。
+
 ## Ephemeral events（任意）
 `relay-stats.conf` に `AUDIT_DIR=~/strfry-audit`（strfry-ratelimit の audit 記録 `audit-YYYYMMDD.tsv[.gz]` の置き場所）を書くと、ページに「Ephemeral events」の欄が出る。書かなければ出ない。
 - `ephemeral.py <audit-dir> <www> [state-dir]` が kind 20000〜29999 の受信件数（拒否分も含む）・受け入れ件数・接続元（IP）の実数を集計し、`www/ephemeral.json` を書く。`run.sh` が毎時呼ぶ。

@@ -10,7 +10,7 @@ export RELAY_STATS_LOCKED=1
 export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}"
 TZOFF="$("$HERE/venv/bin/python" "$HERE/tzoffset.py")"
 export RELAY_STATS_TZ_OFFSET="$TZOFF"
-nice -n 10 "$HERE/relay-scan" "$2" 1669852800 "$(date +%s)" full > "$HERE/full.tsv"
+nice -n 10 "$HERE/${RELAY_STATS_SCANNER:-relay-scan}" "$2" 1669852800 "$(date +%s)" full > "$HERE/full.tsv"
 # backfill.py writes <outdir>/history and <outdir>/lang-cache.json; build in a staging dir
 STAGE="$HERE/www.backfill"
 rm -rf "$STAGE"; mkdir -p "$STAGE"

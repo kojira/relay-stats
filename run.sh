@@ -14,7 +14,7 @@ TMP="$HERE/scan.tsv"
 export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}"
 TZOFF="$("$HERE/venv/bin/python" "$HERE/tzoffset.py")"
 export RELAY_STATS_TZ_OFFSET="$TZOFF"
-nice -n 10 "$HERE/relay-scan" "$DB" "$SINCE" > "$TMP.new"
+nice -n 10 "$HERE/${RELAY_STATS_SCANNER:-relay-scan}" "$DB" "$SINCE" > "$TMP.new"
 mv "$TMP.new" "$TMP"
 nice -n 10 "$HERE/venv/bin/python" "$HERE/analyze.py" "$RELAY" "$TMP" "$HERE/www" ${BAN:+"$BAN"}
 # OG image (www/assets/og.png); failure must not break the stats update

@@ -62,16 +62,59 @@ NOISE = re.compile(r"https?://\S+|nostr:\S+|(?:npub|note|nevent|naddr|nprofile)1
 TOP_LANGS = 12
 
 
+# lid.176 leans to "ja" for Han-only text (no kana), so Chinese is often called Japanese. CJK text is decided by
+# script instead: kana present -> ja; Han-only -> zh / ja by characters that exist in only one of the two
+# (simplified / traditional-only forms and Chinese particles vs Japanese shinjitai / kokuji / 々);
+# Han-only text with no such character gives no vote.
+KANA = re.compile(r"[\u3041-\u309f\u30a1-\u30fa\u30fc\uff66-\uff9f]")
+HIRA = re.compile(r"[\u3041-\u309f]")
+HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+LETTER = re.compile(r"[^\W\d_]")
+ZH_ONLY = set(
+    "这们个说时对过还发么样问书车东长门见头买卖让认识语读请谢电话开关现实习产镜轻记码无员钱红绿边进连运远该谁较级经结给统专业务动劳华单卫历厅压变听吗呢啊吧亲报场块坚"
+    "处备复够奋妈妇娱孙宁审宽导层岁岛币帅师带帮库应庆张录彻态总恶惊惯战户执扩扫护拥择换摄敌显晓暂术杀权极构枪标树桥梦检欢气汇汉沟泽洁测济浓涛润涨渐满滚灭灵炼烟热爱牵"
+    "犹狮猎环玛畅疗盖监盘离种积称稳穷竞笔简粮紧纠纪约纯纸线练组细织终绍绑绕绘络绝继绩续维综缓编缘缩罗网罚职联肃胜脑脸腾舰艺节苏药莱获萨营虑虽补观规视览觉计订讨训讯讲"
+    "讶许论设访证评诉词译试诗诚诞询详误诸调谈谊谋谓谨谱贝负贡财责贤败货质贩贪贫购贯贴费贵贸贺资赏赔赖赚赛赞赠赢赵赶趋跃践踪轨轮软轰载辆辈辉输辑达迁迈违迟适递逊遗邓邮"
+    "郑酱释针钉钓钟钢钥铁铃铜铝银铺链销锁锅错锦键镇闪闭闯闲间闹闻阀阅阔队阳阴阵阶际陆陈险随隐难雾页顶项顺须顾顿预领颇频题颜额风飞饭饮饰饱饿馆驱驶驻驾验骑骗鱼鸟鸡鸣鸭"
+    "鹅齐龄龟們這說來對會學國實發經體與為麼裡還讓點選關臺灣號雖應歡嗎聽覺變圖歲縣廣傳鐵轉檢單戰數藥續總濟兩價壓龍龜醫氣區歐黨獨寫舊證譯議讀權觀驗賣樣當從很"
+)
+JA_ONLY = set(
+    "々帰関発気駅売読楽変図円歳県沢様広伝鉄転実対検単戦薬経続総済覚両価圧払渋絵浜桜込畑峠枠働辻栃匂凪営険闘歩毎悪悩亜仏団囲観権歓勧駆騒験鶏竜亀譲醸弁舗辺隣黒満焼恵徳"
+    "応拡択栄乗剰寝掲渓隠稲穏髪殻脳嬢壌穂瀬頼曽巣桟帯逓戻涙拝斎剤斉渇謁廃"
+)
+
+
+def script_lang(t):
+    """"ja"/"zh" decided from the script; None = no Han / kana (fastText decides); "" = Han without kana and no
+    telling character (fastText may still decide a non-CJK language from the rest of the text)."""
+    if HIRA.search(t) or len(KANA.findall(t)) >= 2:   # one katakana alone is often a kaomoji (ツ)
+        return "ja"
+    han = HAN.findall(t)
+    if not han:
+        return None
+    if len(han) * 2 < len(LETTER.findall(t)):   # mostly another script (e.g. a Han name in English text)
+        return ""
+    zh = sum(c in ZH_ONLY for c in t)
+    ja = sum(c in JA_ONLY for c in t)
+    return "zh" if zh > ja else "ja" if ja > zh else ""
+
+
 def detect(text):
     t = NOISE.sub(" ", text).replace("\n", " ").strip()
     t = t.encode("utf-8", "replace").decode("utf-8")   # drop lone surrogates
+    s = script_lang(t)
+    if s:
+        return s
     if len(t) < 4:
         return None
     try:
         (label,), (p,) = MODEL.predict(t)
     except (TypeError, ValueError):
         return None
-    return label[9:] if p >= 0.5 else None
+    label = label[9:]
+    if s == "" and label in ("ja", "zh", "yue", "wuu", "ko"):   # Han without kana: fastText cannot tell these apart
+        return None
+    return label if p >= 0.5 else None
 
 
 def is_ephemeral(kind):

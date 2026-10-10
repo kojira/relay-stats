@@ -89,6 +89,7 @@ def main():
     profiles = {}
     bridge_marked = set()
     kinds30 = collections.Counter()
+    latest_note = {}   # pk -> (created_at, content JSON literal) of the newest kind 1 in the scan window
     with open(scan, encoding="utf-8", errors="replace") as f:
         for line in f:
             rec = line.rstrip("\n").split("\t")
@@ -101,6 +102,8 @@ def main():
                 kinds30[kind] += 1
                 if not is_ephemeral(kind) and kind not in NOT_ACTIVITY:
                     actdays[pk].add(day_of(ca))
+                if kind == 1 and content != "-" and ca > latest_note.get(pk, (0,))[0]:
+                    latest_note[pk] = (ca, content)
                 if content != "-":
                     try:
                         lang = detect(json.loads(content))
@@ -144,7 +147,7 @@ def main():
             l = detect(text)
             if l:
                 lang[pk] = l
-    inferred = {}
+    inferred, from_cache = {}, set()
     for pk in last:
         if pk in lang or pk not in target:
             continue
@@ -157,6 +160,7 @@ def main():
     for pk in last:
         if pk not in lang and pk not in inferred and pk in lang_cache:
             inferred[pk] = lang_cache[pk]
+            from_cache.add(pk)
 
     def klass(pk):
         if pk not in profiles:
@@ -212,7 +216,67 @@ def main():
             out = snap
     out["today"] = {"date": day_name(today), "active": json.load(open(os.path.join(outdir, "history", f"{day_name(today)}.json")))["active"]}
     write(os.path.join(outdir, "stats.json"), out)
+    try:
+        write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, profiles, latest_note, bridges, klass, nip05)
+    except Exception as e:   # the account list is a debugging aid; never block the stats update
+        print(f"accounts list failed: {e!r}", file=sys.stderr)
     render(out, outdir)
+
+
+def write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, profiles, latest_note, bridges, klass, nip05):
+    """assets/accounts-<lang>.json: every account active in the last 30 days with its profile, newest note and
+    the evidence behind its language, so the language split can be checked by eye (landing page #accounts)."""
+    adir = os.path.join(outdir, "assets")
+    os.makedirs(adir, exist_ok=True)
+
+    def cut(v, n):
+        v = v if isinstance(v, str) else ""
+        return v if len(v) <= n else v[:n] + "…"
+
+    groups = collections.defaultdict(list)
+    for pk, ds in actdays.items():
+        recent = [d for d in ds if today - 30 < d <= today]
+        if not recent:
+            continue
+        if pk in votes and votes[pk]:
+            how = "note"
+        elif pk in lang:
+            how = "profile"
+        elif pk in inferred:
+            how = "history" if pk in from_cache else "reactions"
+        else:
+            how = "none"
+        l = BRIDGE_KEY if pk in bridges else (lang.get(pk) or inferred.get(pk) or "unknown")
+        p = profiles.get(pk) if isinstance(profiles.get(pk), dict) else {}
+        note = latest_note.get(pk)
+        text = None
+        if note:
+            try:
+                text = json.loads(note[1])
+            except ValueError:
+                text = None
+        groups[l].append({
+            "pk": pk, "how": how, "votes": dict(votes[pk].most_common(4)) if pk in votes else {},
+            "last": day_name(max(recent)), "days": len(recent), "cls": klass(pk),
+            "name": cut(p.get("display_name") or p.get("name"), 60), "nip05": cut(nip05(pk), 80),
+            "about": cut(p.get("about"), 240), "pic": cut(p.get("picture"), 300) if str(p.get("picture") or "").startswith("https://") else "",
+            "note": cut(text, 300) if text else "", "note_at": note[0] if note else 0,
+        })
+    index = {}
+    for l, rows in groups.items():
+        rows.sort(key=lambda r: (r["last"], r["note_at"]), reverse=True)
+        tmp = os.path.join(adir, f"accounts-{l}.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"lang": l, "date": day_name(today), "rows": rows}, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, os.path.join(adir, f"accounts-{l}.json"))
+        index[l] = len(rows)
+    for n in os.listdir(adir):   # languages that dropped out
+        if n.startswith("accounts-") and n.endswith(".json") and n[9:-5] not in index:
+            os.remove(os.path.join(adir, n))
+    tmp = os.path.join(adir, "accounts.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"date": day_name(today), "langs": index}, f, separators=(",", ":"))
+    os.replace(tmp, os.path.join(adir, "accounts.json"))
 
 
 def render(s, outdir):

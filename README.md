@@ -32,6 +32,13 @@ strfry 側: `relay.landingPageFile` と `/assets/` 配信（kojira/strfry PR #4�
 - `events_30d` / `kinds_30d` は実際には走査窓（32日）の件数。`inferred_from_reactions` には lang-cache（過去の言語判定）由来も含む。
 - TIMEZONE の現在の UTC オフセットで日を区切る（夏時間の切り替えは無視）。不正な TIMEZONE はエラーで止まる。
 
+## Ephemeral events（任意）
+`relay-stats.conf` に `AUDIT_DIR=~/strfry-audit`（strfry-ratelimit の audit 記録 `audit-YYYYMMDD.tsv[.gz]` の置き場所）を書くと、ページに「Ephemeral events」の欄が出る。書かなければ出ない。
+- `ephemeral.py <audit-dir> <www> [state-dir]` が kind 20000〜29999 の受信件数（拒否分も含む）・受け入れ件数・接続元（IP）の実数を集計し、`www/ephemeral.json` を書く。`run.sh` が毎時呼ぶ。
+- 表示: Hourly（直近31日）/ Daily / Monthly / By hour of day（時刻ごとの平均）。日の区切りは `TIMEZONE`。集計途中の期間は partial として点線・白抜きで描く。
+- 前回から変わった audit ファイルだけ読み直す（x で約1秒、初回は7日分で約26秒）。
+- 状態は `state/ephemeral/`（git 管理外）。接続元はハッシュ化した値だけを前月・今月分保持し、それより古い日・月は確定値として残す（audit の90日保持を過ぎてもグラフは残る）。ページと JSON には件数だけを出す。作り直すときは `state/ephemeral/` を消す。
+
 ## 過去分の再計算（backfill）
 `nohup ./backfill-run.sh <relay> <db> <banlist> > backfill.log 2>&1 &` が全部やる（`.lock` で loop と排他。履歴は `www.backfill/` に作ってから差し替えるので、失敗しても既存の履歴は残る）。
 全件走査は1つの読み取りトランザクションで行う（r で約18分）。その間 LMDB は解放ページを再利用できないので、書き込みの多いリレーではファイルが少し伸びることがある。

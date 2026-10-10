@@ -12,3 +12,4 @@ lib/*.ftz
 *.bak-*
 .lock/
 www.backfill/
+state/

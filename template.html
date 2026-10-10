@@ -143,6 +143,7 @@
   .acc .nt.none { color:#3c5568; font-style:italic; }
   .acc .why { font-size:10px; letter-spacing:.06em; padding:1px 6px; border-radius:2px; border:1px solid currentColor; }
   .why.note { color:var(--cyan); } .why.profile { color:var(--amber); } .why.reactions, .why.history { color:var(--mag); } .why.none { color:#5f7d91; }
+  #accday { background:#0a1420; color:#e8fbff; border:1px solid #1d3346; border-radius:3px; padding:4px 8px; font:inherit; font-size:12px; }
   #accmore { display:block; margin:14px auto 0; }
   body.accmode main > :not(header):not(#acc):not(footer) { display:none !important; }
   footer { margin-top:24px; text-align:center; color:#3c5568; font-size:10px; letter-spacing:.3em; text-transform:uppercase; }
@@ -221,13 +222,19 @@
   <section class="panel" id="acc" hidden>
     <h2>Accounts by language <span class="meta" id="accinfo"></span>
       <span class="seg"><button onclick="location.hash='';return false">← Stats</button></span></h2>
+    <div class="ctl" style="margin-bottom:6px">
+      <span class="seg" id="accper"><button data-v="mau" class="on">30 days (MAU)</button><button data-v="day">Daily (DAU)</button></span>
+      <span class="seg" id="accdaynav" hidden><button id="accprev">◀</button></span>
+      <select id="accday" hidden></select>
+      <span class="seg" id="accdaynav2" hidden><button id="accnext">▶</button></span>
+    </div>
     <div class="lt" id="acclangs"></div>
     <div class="ctl">
       <input type="search" id="accq" placeholder="filter: name / text / npub">
       <span class="seg" id="acchow"><button data-v="" class="on">All</button><button data-v="note">by notes</button><button data-v="profile">by profile</button><button data-v="reactions">by reactions</button><button data-v="history">by history</button><button data-v="none">undetermined</button></span>
     </div>
     <ul class="note" style="margin:0 0 6px">
-      <li>Every account counted in MAU (active in the last 30 days), newest activity first, with its kind 0 and newest kind 1 stored here. The badge shows how its language was decided: <b>notes</b> = fastText on its own notes (vote counts shown), <b>profile</b> = name / about, <b>reactions</b> = language of the people it reacted to / replied to, <b>history</b> = earlier full-history result.</li>
+      <li>Every account counted in MAU (active in the last 30 days) — or, in <b>Daily</b>, in that day's DAU — newest activity first, with its kind 0 and newest kind 1 stored here. The badge shows how its language was decided: <b>notes</b> = fastText on its own notes (vote counts shown), <b>profile</b> = name / about, <b>reactions</b> = language of the people it reacted to / replied to, <b>history</b> = earlier full-history result.</li>
     </ul>
     <div id="acclist"></div>
     <button class="btn" id="accmore" hidden>More ↓</button>
@@ -615,19 +622,30 @@ const ACC = (() => {
     return hrp + '1' + [...data, ...cs].map(d => CH[d]).join('');
   }
   const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-  let index = null, cur = null, rows = [], view = [], shown = 0, how = '';
+  let index = null, cur = null, rows = [], view = [], shown = 0, how = '', ago = -1;   // ago -1 = whole 30 days
+  const dateOf = a => { const d = new Date(index.date + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - a); return d.toISOString().slice(0, 10); };
+  function hashFor(l) { return 'accounts=' + l + (ago >= 0 ? '&day=' + dateOf(ago) : ''); }
   const PAGE = 100;
 
-  async function open(l) {
+  async function open(l, day) {
     document.body.classList.add('accmode'); $('acc').hidden = false; window.scrollTo(0, 0);
     if (!index) {
       try { index = await (await fetch('/assets/accounts.json', { cache: 'no-cache' })).json(); }
       catch (e) { $('acclist').innerHTML = '<p class="note">account list not available yet</p>'; return; }
     }
-    const langs = Object.entries(index.langs).sort((a, b) => b[1] - a[1]);
+    ago = -1;
+    if (day && index.daily) for (let a = 0; a < 30; a++) if (dateOf(a) === day) ago = a;
+    $('accday').innerHTML = Array.from({ length: 30 }, (_, a) => `<option value="${a}">${dateOf(a)}${a === 0 ? ' (today, partial)' : ''}</option>`).join('');
+    $('accday').value = String(Math.max(ago, 0));
+    const daily = ago >= 0;
+    $('accper').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === (daily ? 'day' : 'mau')));
+    ['accday', 'accdaynav', 'accdaynav2'].forEach(id => $(id).hidden = !daily);
+    $('accprev').disabled = ago >= 29; $('accnext').disabled = ago <= 0;
+    const cnt = k => daily ? (index.daily?.[k]?.[ago] || 0) : index.langs[k];
+    const langs = Object.keys(index.langs).map(k => [k, cnt(k)]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
     if (!l || !index.langs[l]) l = index.langs.ja ? 'ja' : langs[0][0];
     $('acclangs').innerHTML = langs.map(([k, n]) => `<button data-l="${esc(k)}" class="${k === l ? 'on' : ''}">${esc(name(k))}<b>${fmt(n)}</b></button>`).join('');
-    $('acclangs').querySelectorAll('button').forEach(b => b.onclick = () => { location.hash = 'accounts=' + b.dataset.l; });
+    $('acclangs').querySelectorAll('button').forEach(b => b.onclick = () => { location.hash = hashFor(b.dataset.l); });
     if (cur !== l) {
       cur = l; rows = []; $('acclist').innerHTML = '<p class="note">loading…</p>';
       try { rows = (await (await fetch(`/assets/accounts-${encodeURIComponent(l)}.json`, { cache: 'no-cache' })).json()).rows; }
@@ -638,10 +656,12 @@ const ACC = (() => {
   }
   function filter() {
     const q = $('accq').value.trim().toLowerCase();
-    view = rows.filter(r => (!how || r.how === how) &&
+    view = rows.filter(r => (!how || r.how === how) && (ago < 0 || (r.ago || []).includes(ago)) &&
       (!q || r.npub.includes(q) || r.pk.startsWith(q) || (r.name + '\n' + r.about + '\n' + r.note + '\n' + r.nip05).toLowerCase().includes(q)));
-    const c = {}; rows.forEach(r => c[r.how] = (c[r.how] || 0) + 1);
-    $('accinfo').textContent = `${name(cur)} · ${fmt(view.length)} / ${fmt(rows.length)} accounts · MAU window ending ${index.date} · ` +
+    const base = ago < 0 ? rows : rows.filter(r => (r.ago || []).includes(ago));
+    const c = {}; base.forEach(r => c[r.how] = (c[r.how] || 0) + 1);
+    $('accinfo').textContent = `${name(cur)} · ${fmt(view.length)} / ${fmt(base.length)} accounts · ` +
+      (ago < 0 ? `30 days ending ${index.date}` : `active on ${dateOf(ago)}${ago === 0 ? ' (partial)' : ''}`) + ' · ' +
       ['note', 'profile', 'reactions', 'history', 'none'].filter(k => c[k]).map(k => `${k} ${fmt(c[k])}`).join(' · ');
     shown = 0; $('acclist').innerHTML = ''; more();
   }
@@ -664,11 +684,16 @@ const ACC = (() => {
   let t; $('accq').addEventListener('input', () => { clearTimeout(t); t = setTimeout(filter, 200); });
   seg('acchow', b => { how = b.dataset.v; filter(); });
   $('accmore').onclick = more;
+  const go = a => { ago = a; location.hash = hashFor(cur); };
+  seg('accper', b => go(b.dataset.v === 'day' ? (ago >= 0 ? ago : 1) : -1));   // default day = last full day
+  $('accday').onchange = () => go(+$('accday').value);
+  $('accprev').onclick = () => go(Math.min(29, ago + 1));
+  $('accnext').onclick = () => go(Math.max(0, ago - 1));
   return { open, close() { document.body.classList.remove('accmode'); $('acc').hidden = true; } };
 })();
 function route() {
-  const m = location.hash.match(/^#accounts(?:=([\w-]+))?/);
-  if (m) ACC.open(m[1]); else ACC.close();
+  const m = location.hash.match(/^#accounts(?:=([\w-]+))?(?:&day=(\d{4}-\d\d-\d\d))?/);
+  if (m) ACC.open(m[1], m[2]); else ACC.close();
 }
 window.addEventListener('hashchange', route);
 route();

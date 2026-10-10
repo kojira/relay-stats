@@ -258,11 +258,12 @@ def write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, pr
         groups[l].append({
             "pk": pk, "how": how, "votes": dict(votes[pk].most_common(4)) if pk in votes else {},
             "last": day_name(max(recent)), "days": len(recent), "cls": klass(pk),
+            "ago": sorted(today - d for d in recent),   # active days, as days before the list date (0 = today)
             "name": cut(p.get("display_name") or p.get("name"), 60), "nip05": cut(nip05(pk), 80),
             "about": cut(p.get("about"), 240), "pic": cut(p.get("picture"), 300) if str(p.get("picture") or "").startswith("https://") else "",
             "note": cut(text, 300) if text else "", "note_at": note[0] if note else 0,
         })
-    index = {}
+    index, daily = {}, {}
     for l, rows in groups.items():
         rows.sort(key=lambda r: (r["last"], r["note_at"]), reverse=True)
         tmp = os.path.join(adir, f"accounts-{l}.json.tmp")
@@ -270,12 +271,17 @@ def write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, pr
             json.dump({"lang": l, "date": day_name(today), "rows": rows}, f, ensure_ascii=False, separators=(",", ":"))
         os.replace(tmp, os.path.join(adir, f"accounts-{l}.json"))
         index[l] = len(rows)
+        per_day = [0] * 30
+        for r in rows:
+            for a in r["ago"]:
+                per_day[a] += 1
+        daily[l] = per_day
     for n in os.listdir(adir):   # languages that dropped out
         if n.startswith("accounts-") and n.endswith(".json") and n[9:-5] not in index:
             os.remove(os.path.join(adir, n))
     tmp = os.path.join(adir, "accounts.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"date": day_name(today), "langs": index}, f, separators=(",", ":"))
+        json.dump({"date": day_name(today), "langs": index, "daily": daily}, f, separators=(",", ":"))
     os.replace(tmp, os.path.join(adir, "accounts.json"))
 
 

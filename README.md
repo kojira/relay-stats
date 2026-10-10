@@ -23,6 +23,10 @@ strfry 側は `relay.landingPageFile = "<このディレクトリ>/www/index.htm
 strfry 側: `relay.landingPageFile` と `/assets/` 配信（kojira/strfry PR #4。~/strfry-build の feat/landing-page-file[-master]）。
 設定を空にすると strfry 標準のページに戻る。
 
+## nostrfy（n.kojira.io）
+nostrfy の LMDB は `src/nostrfy-scan.c` で読む（出力は relay-scan と同じ TSV）。nostrfy と同じ LMDB（lmdb-master-sys, `MDB_IDL_LOGN=16`）でビルドすること。
+`RELAY_STATS_SCANNER=nostrfy-scan` で run.sh / backfill-run.sh が relay-scan の代わりに使う。
+
 ## 設定（relay-stats.conf）
 - `TIMEZONE=Asia/Tokyo` … DAU/WAU/MAU の日付の区切り（IANA 名。UTC, America/New_York など）。変更後は過去分も backfill し直すこと。
 

@@ -230,7 +230,12 @@ def render(s, outdir):
         except Exception:
             pass
     tpl = open(os.environ.get("RELAY_STATS_TEMPLATE", os.path.join(HERE, "template.html")), encoding="utf-8").read()
-    data = json.dumps({"stats": s, "history": hist}, ensure_ascii=False).replace("<", "\\u003c")
+    eph = None
+    try:
+        eph = json.load(open(os.path.join(outdir, "ephemeral.json")))   # written by ephemeral.py (relays with an audit trail)
+    except (OSError, ValueError):
+        pass
+    data = json.dumps({"stats": s, "history": hist, "ephemeral": eph}, ensure_ascii=False).replace("<", "\\u003c")
     html = (tpl.replace("__RELAY_STATS_DATA__", data).replace("__RELAY_NAME__", s["relay"])
                .replace("__OG_VERSION__", str(s.get("date", "")).replace("-", "")))   # changes daily -> SNS caches refresh
     tmp = os.path.join(outdir, "index.html.tmp")

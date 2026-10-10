@@ -16,6 +16,13 @@ TZOFF="$("$HERE/venv/bin/python" "$HERE/tzoffset.py")"
 export RELAY_STATS_TZ_OFFSET="$TZOFF"
 nice -n 10 "$HERE/${RELAY_STATS_SCANNER:-relay-scan}" "$DB" "$SINCE" > "$TMP.new"
 mv "$TMP.new" "$TMP"
+# ephemeral traffic from the strfry-ratelimit audit trail (www/ephemeral.json); opt-in with AUDIT_DIR in
+# relay-stats.conf (or RELAY_STATS_AUDIT_DIR), never fatal
+AUDIT="${RELAY_STATS_AUDIT_DIR:-$(sed -n 's/^AUDIT_DIR=//p' "${RELAY_STATS_CONF:-$HERE/relay-stats.conf}" 2>/dev/null | tail -1)}"
+AUDIT="${AUDIT/#\~/$HOME}"
+if [ -n "$AUDIT" ] && [ -d "$AUDIT" ]; then
+    nice -n 10 "$HERE/venv/bin/python" "$HERE/ephemeral.py" "$AUDIT" "$HERE/www" "$HERE/state/ephemeral" || echo "$(date '+%F %T') ephemeral stats failed" >&2
+fi
 nice -n 10 "$HERE/venv/bin/python" "$HERE/analyze.py" "$RELAY" "$TMP" "$HERE/www" ${BAN:+"$BAN"}
 # OG image (www/assets/og.png); failure must not break the stats update
 nice -n 10 "$HERE/venv/bin/python" "$HERE/og.py" "$HERE/www" || echo "$(date '+%F %T') og.png render failed" >&2

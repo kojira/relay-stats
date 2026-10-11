@@ -203,8 +203,9 @@
   </section>
 
   <section class="panel" id="eph" hidden>
-    <h2>Ephemeral events <span class="meta" id="ephinfo"></span></h2>
+    <h2>Event traffic <span class="meta" id="ephinfo"></span></h2>
     <div class="ctl">
+      <span class="seg" id="ephcls"><button data-v="all" class="on">All kinds</button><button data-v="regular">Non-ephemeral</button><button data-v="ephemeral">Ephemeral</button></span>
       <span class="seg" id="ephgran"><button data-v="hourly" class="on">Hourly</button><button data-v="daily">Daily</button><button data-v="monthly">Monthly</button><button data-v="tod">By hour of day</button></span>
       <span class="spacer"></span>
       <span class="chips" style="margin:0">
@@ -214,7 +215,8 @@
     </div>
     <div class="chartbox"><canvas id="ephchart"></canvas><div id="ephtip" class="tipbox"></div></div>
     <ul class="note" style="margin:10px 0 0">
-      <li><b>Events</b> = ephemeral events (kinds 20000–29999) received, including rejected ones. <b>Sources</b> = distinct connecting addresses (IP) that sent at least one in the period.</li>
+      <li><b>Events</b> = EVENT messages received, including rejected ones: <b>Ephemeral</b> = kinds 20000–29999, <b>Non-ephemeral</b> = every other kind, <b>All kinds</b> = both. <b>Sources</b> = distinct connecting addresses (IP / forwarder) that sent at least one in the period.</li>
+      <li>Only events written to this relay over its WebSocket are counted; events this relay pulls from other relays (sync / router) are not in the audit trail.</li>
       <li>From this relay's write-policy audit trail (kept 90 days; daily / monthly totals are kept after that). Hourly covers the last 31 days. Hollow points = period not fully covered. <b>By hour of day</b> = average of each clock hour over those days.</li>
     </ul>
   </section>
@@ -476,15 +478,16 @@ $('csv').onclick = e => {
 $('presets').querySelector('[data-d="365"]').classList.add('on');
 setRange(365);
 
-// ---- ephemeral traffic ------------------------------------------------------------
+// ---- event traffic (ephemeral / non-ephemeral / all) ----------------------------------
 (() => {
-  const E = D.ephemeral;
-  if (!E || !E.hourly || !E.hourly.length) return;
+  const T = D.traffic;
+  const CL = T && T.classes && Object.keys(T.classes).filter(k => T.classes[k].hourly && T.classes[k].hourly.length);
+  if (!CL || !CL.length) return;
   $('eph').hidden = false;
-  const tz = E.timezone || S.timezone;
+  const tz = T.timezone || S.timezone;
   const hourLabel = t => new Date(t * 1000).toLocaleString('sv-SE', { timeZone: tz }).slice(0, 13) + 'h';
   const daysIn = ym => new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7), 0)).getUTCDate();
-  const SETS = {
+  const build = E => ({
     hourly: E.hourly.map(r => ({ k: hourLabel(r[0]), ev: r[1], acc: r[2], src: r[3], full: r[0] + 3600 <= E.generated_at })),   // current hour = in progress
     daily: E.daily.map(r => ({ k: r[0], ev: r[1], acc: r[2], src: r[3], full: r[4] >= 24 })),
     monthly: E.monthly.map(r => ({ k: r[0], ev: r[1], acc: r[2], src: r[3], full: r[4] >= daysIn(r[0]) * 24 })),
@@ -497,11 +500,19 @@ setRange(365);
       }
       return b.map(x => x.n ? { ...x, ev: x.ev / x.n, acc: x.acc / x.n, src: x.src / x.n } : x);
     })(),
-  };
+  });
+  const BY = {};
+  CL.forEach(k => { BY[k] = build({ ...T.classes[k], generated_at: T.generated_at }); });
+  const CLNAME = { all: 'all kinds', regular: 'non-ephemeral', ephemeral: 'ephemeral' };
   const COL = { ev: '#00e5ff', src: '#ffb84d' };
   let gran = (location.hash.match(/eph=(hourly|daily|monthly|tod)/) || [])[1] || 'hourly', g = null;
+  let cls = (location.hash.match(/kinds=(all|regular|ephemeral)/) || [])[1] || 'all';
+  if (!BY[cls]) cls = CL[0];
+  let SETS = BY[cls];
+  $('ephcls').querySelectorAll('button').forEach(b => { b.hidden = !BY[b.dataset.v]; b.classList.toggle('on', b.dataset.v === cls); });
   $('ephgran').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === gran));
   seg('ephgran', b => { gran = b.dataset.v; draw2(); });
+  seg('ephcls', b => { cls = b.dataset.v; SETS = BY[cls]; draw2(); });
 
   function axis(max) {
     const m = Math.max(1, max) * 1.08, t = niceTicks(m, 5);
@@ -577,8 +588,8 @@ setRange(365);
     }
     const tot = v.reduce((a, r) => a + r.ev, 0);
     $('ephinfo').textContent = gran === 'tod'
-      ? `average per hour of day (${tz}) · last ${Math.max(...v.map(r => r.n))} days · complete hours only`
-      : `${gran} · ${v[0].k} → ${v[n - 1].k} · ${fmt(tot)} events`;
+      ? `${CLNAME[cls]} · average per hour of day (${tz}) · last ${Math.max(...v.map(r => r.n))} days · complete hours only`
+      : `${CLNAME[cls]} · ${gran} · ${v[0].k} → ${v[n - 1].k} · ${fmt(tot)} events`;
   }
 
   const c = $('ephchart');

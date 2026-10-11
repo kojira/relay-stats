@@ -45,12 +45,14 @@ nostrfy の LMDB は `src/nostrfy-scan.c` で読む（出力は relay-scan と�
 `https://<relay>/#accounts=<lang>`（日別は `&day=YYYY-MM-DD`）。MAU / その日の DAU に数えたアカウントを、kind 0・最新の kind 1・言語の決め方つきで並べる。言語判定の確認用。
 データは analyze.py が毎時 `www/assets/accounts.json`（言語別の人数・日別人数）と `www/assets/accounts-<lang>.json` に書く。
 
-## Ephemeral events（任意）
-`relay-stats.conf` に `AUDIT_DIR=~/strfry-audit`（strfry-ratelimit の audit 記録 `audit-YYYYMMDD.tsv[.gz]` の置き場所）を書くと、ページに「Ephemeral events」の欄が出る。書かなければ出ない。
-- `ephemeral.py <audit-dir> <www> [state-dir]` が kind 20000〜29999 の受信件数（拒否分も含む）・受け入れ件数・接続元（IP）の実数を集計し、`www/ephemeral.json` を書く。`run.sh` が毎時呼ぶ。
+## Event traffic（任意）
+`relay-stats.conf` に `AUDIT_DIR=~/strfry-audit`（strfry-ratelimit の audit 記録 `audit-YYYYMMDD.tsv[.gz]` の置き場所）を書くと、ページに「Event traffic」の欄が出る。書かなければ出ない。
+- `traffic.py <audit-dir> <www> [state-dir]` が、受信した EVENT の件数（拒否分も含む）・受け入れ件数・接続元（IP）の実数を集計し、`www/traffic.json` を書く。`run.sh` が毎時呼ぶ。
+- 種類は3つ: All kinds（全部）/ Non-ephemeral（kind 20000〜29999 以外）/ Ephemeral（kind 20000〜29999）。URL の `#kinds=all|regular|ephemeral` でも選べる。
+- 数えるのはこのリレーへ WebSocket で書き込まれたイベントだけ。他のリレーから取り込んだもの（同期・router）は audit に残らないので入らない。
 - 表示: Hourly（直近31日）/ Daily / Monthly / By hour of day（時刻ごとの平均）。日の区切りは `TIMEZONE`。集計途中の期間は partial として点線・白抜きで描く。
 - 前回から変わった audit ファイルだけ読み直す（x で約1秒、初回は7日分で約26秒）。
-- 状態は `state/ephemeral/`（git 管理外）。接続元はハッシュ化した値だけを前月・今月分保持し、それより古い日・月は確定値として残す（audit の90日保持を過ぎてもグラフは残る）。ページと JSON には件数だけを出す。作り直すときは `state/ephemeral/` を消す。
+- 状態は `state/traffic/`（git 管理外）。接続元はハッシュ化した値だけを前月・今月分保持し、それより古い日・月は確定値として残す（audit の90日保持を過ぎてもグラフは残る）。ページと JSON には件数だけを出す。作り直すときは `state/traffic/` を消す。
 
 ## 過去分の再計算（backfill）
 `nohup ./backfill-run.sh <relay> <db> <banlist> > backfill.log 2>&1 &` が全部やる（`.lock` で loop と排他。履歴は `www.backfill/` に作ってから差し替えるので、失敗しても既存の履歴は残る）。

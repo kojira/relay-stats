@@ -123,6 +123,9 @@ int main(int argc, char **argv) {
     CHK(mdb_env_set_maxreaders(env, 1025));
     // mapsize 0 = use the size recorded in the environment
     CHK(mdb_env_open(env, argv[1], MDB_RDONLY | MDB_NOTLS, 0644));
+    // free reader slots left by processes that died mid-read (killed scan, crash): a stale slot pins
+    // its old snapshot, so the relay can never reuse freed pages and the data file keeps growing
+    { int dead = 0; mdb_reader_check(env, &dead); if (dead) fprintf(stderr, "cleared %d stale LMDB reader(s)\n", dead); }
     CHK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
     CHK(mdb_dbi_open(txn, "events", 0, &dEv));
     CHK(mdb_dbi_open(txn, "event_meta", 0, &dMeta));

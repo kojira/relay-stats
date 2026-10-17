@@ -117,6 +117,9 @@ int main(int argc, char **argv) {
     CHK(mdb_env_set_mapsize(env, (size_t)10995116277760ULL));
     CHK(mdb_env_set_maxreaders(env, 1025));
     CHK(mdb_env_open(env, argv[1], MDB_RDONLY, 0644));
+    // free reader slots left by processes that died mid-read (killed scan, crash): a stale slot pins
+    // its old snapshot, so the relay can never reuse freed pages and the data file keeps growing
+    { int dead = 0; mdb_reader_check(env, &dead); if (dead) fprintf(stderr, "cleared %d stale LMDB reader(s)\n", dead); }
     CHK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
     CHK(mdb_dbi_open(txn, "rasgueadb_defaultDb__Event", MDB_INTEGERKEY, &dEv));
     CHK(mdb_dbi_open(txn, "rasgueadb_defaultDb__EventPayload", MDB_INTEGERKEY, &dPl));

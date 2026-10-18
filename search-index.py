@@ -9,7 +9,8 @@ usage: search-index.py <db-path> [--full]
 default  incremental: events with created_at since the last run minus 2 days, plus kind 5 deletions
 
 Tables
-  notes(rowid, id BLOB, pubkey BLOB, kind, created_at, d, nsfw, content)  + notes_fts (contentless trigram)
+  notes(rowid = created_at << 20 | low bits of the id, so FTS rowid order is time order and a time range is a
+        rowid range;  id BLOB, pubkey BLOB, kind, created_at, d, nsfw, content)  + notes_fts (contentless trigram)
   profiles(rowid, pubkey BLOB, created_at, name, display_name, nip05, picture, about) + profiles_fts
   meta(k, v)
 Kind 30023 keeps only the newest version per (pubkey, d). Banned pubkeys are filtered by the reader
@@ -82,12 +83,20 @@ def put_note(db, e):
         title = next((t[1] for t in e.get("tags", []) if len(t) > 1 and t[0] == "title"), "")
         if title:
             content = title + "\n" + content
-    cur = db.execute("INSERT OR IGNORE INTO notes(id, pubkey, kind, created_at, d, nsfw, content) VALUES(?,?,?,?,?,?,?)",
-                     (eid, pk, e["kind"], e["created_at"], d, is_nsfw(e), content))
-    if cur.rowcount:
-        db.execute("INSERT INTO notes_fts(rowid, content) VALUES(?,?)", (cur.lastrowid, content))
-        return 1
-    return 0
+    if db.execute("SELECT 1 FROM notes WHERE id=?", (eid,)).fetchone():
+        return 0
+    rowid = time_rowid(e["created_at"], eid)
+    while db.execute("SELECT 1 FROM notes WHERE rowid=?", (rowid,)).fetchone():
+        rowid += 1
+    db.execute("INSERT INTO notes(rowid, id, pubkey, kind, created_at, d, nsfw, content) VALUES(?,?,?,?,?,?,?,?)",
+               (rowid, eid, pk, e["kind"], e["created_at"], d, is_nsfw(e), content))
+    db.execute("INSERT INTO notes_fts(rowid, content) VALUES(?,?)", (rowid, content))
+    return 1
+
+
+def time_rowid(created_at, eid):
+    ca = max(0, min(int(created_at), (1 << 42) - 1))      # clamp absurd timestamps
+    return (ca << 20) | (int.from_bytes(eid[:3], "big") & 0xFFFF0)
 
 
 def delete_rowid(db, rowid):

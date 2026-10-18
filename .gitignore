@@ -13,3 +13,5 @@ lib/*.ftz
 .lock/
 www.backfill/
 state/
+web/node_modules/
+web/*.log

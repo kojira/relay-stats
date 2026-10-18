@@ -1,0 +1,10 @@
+{
+  "name": "relay-stats-web",
+  "private": true,
+  "type": "module",
+  "description": "njump-style note / profile pages and full-text search for a strfry relay",
+  "dependencies": {
+    "marked": "^15.0.12",
+    "nostr-tools": "^2.11.0"
+  }
+}

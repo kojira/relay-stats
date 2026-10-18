@@ -54,6 +54,43 @@ nostrfy の LMDB は `src/nostrfy-scan.c` で読む（出力は relay-scan と�
 - 前回から変わった audit ファイルだけ読み直す（x で約1秒、初回は7日分で約26秒）。
 - 状態は `state/traffic/`（git 管理外）。接続元はハッシュ化した値だけを前月・今月分保持し、それより古い日・月は確定値として残す（audit の90日保持を過ぎてもグラフは残る）。ページと JSON には件数だけを出す。作り直すときは `state/traffic/` を消す。
 
+## 投稿ページと全文検索（任意、strfry のみ）
+njump.me と同じ形の URL で、投稿・記事・プロフィールのページと全文検索を出す。HTML はサーバーで作るので、検索エンジンにも読ませられる。
+- URL:
+  - `/npub1…`：プロフィールと最新の投稿
+  - `/note1…`：kind 1 の投稿、または kind 30023 の記事
+  - `/search/<検索語>`：全文検索
+  - `/npub/<hex>` と `/event/<hex>`：`/npub1…`・`/note1…` へ301で転送
+  - `/robots.txt`、`/sitemap.xml`
+  - それ以外は 404（nprofile / nevent / naddr も 404）
+- 出さないもの（404）:
+  - ban 済みの pubkey（banlist は変更を検知して読み直す）
+  - 削除された投稿（kind 5）
+  - NSFW 扱いの投稿（`content-warning` タグ、`t` / `l` タグの `nsfw`、本文の `#nsfw`）
+- 検索ページは `noindex,follow`。Google に登録するのは投稿・記事・プロフィールのページで、sitemap には直近365日分を載せる。
+- 検索:
+  - `search-index.py` が kind 1・30023 の本文と、kind 0 の名前を SQLite FTS5（trigram）に入れる。
+  - 3文字以上の語で検索し、2文字以下の語は絞り込みにだけ使う。
+  - 接続元ごとに回数を制限する（1分あたり、ページ表示120回か検索30回まで）。
+- 構成:
+  - `web/server.mjs`（Node 22.5 以上、`node:sqlite` を使う）が 127.0.0.1:7780 で動く。投稿はリレーに WebSocket で取りにいき、LMDB は直接開かない。
+  - cloudflared の ingress で、上の URL だけを 7780 に回す。
+- 準備:
+  ```sh
+  (cd web && npm install)
+  # relay-stats.conf
+  SEARCH_STRFRY=/path/to/strfry --config /path/to/strfry.conf
+  # 初回の全件索引（r で約15分）。以後は run.sh が毎時、追加分と削除を反映する
+  SEARCH_STRFRY="..." ./venv/bin/python search-index.py state/search/build.sqlite --full && mv state/search/build.sqlite state/search/search.sqlite
+  cp web/launchd/io.kojira.relay-stats-web.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.kojira.relay-stats-web.plist
+  ```
+  cloudflared の設定例（strfry への規則より前に置く）:
+  ```yaml
+  - hostname: r.kojira.io
+    path: ^/(npub1[0-9a-z]+|note1[0-9a-z]+|nprofile1[0-9a-z]*|nevent1[0-9a-z]*|naddr1[0-9a-z]*|npub/.*|event/.*|search(/.*)?|robots\.txt|sitemap(-[0-9a-z]+)?\.xml)$
+    service: http://127.0.0.1:7780
+  ```
+
 ## 過去分の再計算（backfill）
 `nohup ./backfill-run.sh <relay> <db> <banlist> > backfill.log 2>&1 &` が全部やる（`.lock` で loop と排他。履歴は `www.backfill/` に作ってから差し替えるので、失敗しても既存の履歴は残る）。
 全件走査は1つの読み取りトランザクションで行う（r で約18分）。その間 LMDB は解放ページを再利用できないので、書き込みの多いリレーではファイルが少し伸びることがある。

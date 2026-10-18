@@ -45,6 +45,9 @@
     background:repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 1px, transparent 1px 3px);
   }
   main { max-width:1180px; margin:0 auto; padding:32px 24px 48px; }
+  .sform { display:flex; gap:6px; flex:1; max-width:460px; min-width:220px; }
+  .sform input { flex:1; background:transparent; border:1px solid var(--line2); color:inherit; padding:6px 10px; border-radius:4px; font:inherit; }
+  .sform button { background:transparent; border:1px solid var(--line2); color:var(--dim); border-radius:4px; padding:0 12px; cursor:pointer; font:inherit; }
   header { display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:12px; margin-bottom:24px; }
   h1 {
     margin:0; font-size:30px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
@@ -156,6 +159,7 @@
       <h1>__RELAY_NAME__</h1>
       <div class="tag">NOSTR RELAY &nbsp;<code>wss://__RELAY_NAME__</code></div>
     </div>
+    <!--SEARCH_FORM-->
     <div class="status"><span class="live">online</span><br>updated <span id="updated"></span><br>refresh every 1h · tz <span id="tz"></span></div>
   </header>
 

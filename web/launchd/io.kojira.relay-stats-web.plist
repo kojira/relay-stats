@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>io.kojira.relay-stats-web</string>
+<key>ProgramArguments</key><array>
+  <string>/opt/homebrew/bin/node</string><string>--no-warnings</string><string>/Users/kojira/relay-stats/web/server.mjs</string>
+</array>
+<key>WorkingDirectory</key><string>/Users/kojira/relay-stats/web</string>
+<key>EnvironmentVariables</key><dict>
+  <key>WEB_PORT</key><string>7780</string>
+  <key>WEB_RELAY_WS</key><string>ws://127.0.0.1:7777</string>
+  <key>WEB_BASE</key><string>https://r.kojira.io</string>
+  <key>WEB_SEARCH_DB</key><string>/Users/kojira/relay-stats/state/search/search.sqlite</string>
+  <!-- launchd cannot read /Volumes/1TB (TCC): use the banlist mirror kept by banlist-mirror.sh -->
+  <key>WEB_BANLIST</key><string>/Users/kojira/strfry-banlist-mirror/banned-pubkeys.txt</string>
+</dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/Users/kojira/relay-stats/web/web.log</string>
+<key>StandardErrorPath</key><string>/Users/kojira/relay-stats/web/web.log</string>
+</dict></plist>

@@ -236,9 +236,13 @@ function whoHtml(pk, prof, small = false) {
   return `<div class="who">${pic ? `<img src="${esc(pic)}" alt="" loading="lazy">` : '<img alt="">'}<div><a class="n" href="/${npubOf(pk)}">${esc(nameOf(pk, p))}</a>
 <div class="s">${p.nip05 ? esc(String(p.nip05).slice(0, 80)) + ' · ' : ''}${small ? '' : esc(npubOf(pk))}</div></div></div>`;
 }
+// public chat (NIP-28): 40 = channel creation, 41 = channel metadata (both JSON content), 42 = message
+const CHAT_KINDS = new Set([40, 41, 42]);
+const channelMeta = e => { try { const m = JSON.parse(e.content); return m && typeof m === 'object' ? m : {}; } catch { return {}; } };
 function noteCard(e, prof, hl = '') {
-  const title = e.kind === 30023 ? ((e.tags.find(t => t[0] === 'title') || [])[1] || '') : '';
-  let text = e.kind === 30023 ? plain(((e.tags.find(t => t[0] === 'summary') || [])[1]) || e.content, 280) : e.content;
+  const ch = e.kind === 40 || e.kind === 41 ? channelMeta(e) : null;
+  const title = e.kind === 30023 ? ((e.tags.find(t => t[0] === 'title') || [])[1] || '') : ch ? String(ch.name || '') : '';
+  let text = e.kind === 30023 ? plain(((e.tags.find(t => t[0] === 'summary') || [])[1]) || e.content, 280) : ch ? String(ch.about || '') : e.content;
   let body = richText(text);
   if (hl) for (const w of hl.split(/\s+/).filter(w => w.length >= 1)) {
     const re = new RegExp('(' + esc(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')(?![^<]*>)', 'gi');
@@ -247,13 +251,13 @@ function noteCard(e, prof, hl = '') {
   return `<article class="card">${whoHtml(e.pubkey, prof, true)}
 ${title ? `<h2 style="margin:.2em 0"><a href="/${noteOf(e.id)}">${esc(title)}</a></h2>` : ''}
 <div class="body">${body}</div>
-<div class="meta"><a href="/${noteOf(e.id)}"><time datetime="${isoTime(e.created_at)}">${fmtTime(e.created_at)}</time></a>${e.kind === 30023 ? '<span>article</span>' : ''}</div></article>`;
+<div class="meta"><a href="/${noteOf(e.id)}"><time datetime="${isoTime(e.created_at)}">${fmtTime(e.created_at)}</time></a>${e.kind === 30023 ? '<span>article</span>' : ''}${e.kind === 42 ? '<span>chat</span>' : ''}${ch ? '<span>chat channel</span>' : ''}</div></article>`;
 }
 
 // ---------- handlers ----------
 async function notePage(id) {
   const [e] = await req({ ids: [id] });
-  if (!e || (e.kind !== 1 && e.kind !== 30023) || !visible(e) || await isDeleted(e)) return notFound();
+  if (!e || (e.kind !== 1 && e.kind !== 30023 && !CHAT_KINDS.has(e.kind)) || !visible(e) || await isDeleted(e)) return notFound();
   const prof = await profileOf(e.pubkey);
   if (prof.ev && nsfw(prof.ev)) return notFound();
   const name = nameOf(e.pubkey, prof.p), canonical = `${BASE}/${noteOf(e.id)}`;
@@ -266,6 +270,10 @@ async function notePage(id) {
 <h1 class="t">${esc(title)}</h1><div class="body article">${articleHtml(e.content)}</div>
 <div class="meta"><time datetime="${isoTime(+tag('published_at') || e.created_at)}">${fmtTime(+tag('published_at') || e.created_at)}</time><span>updated ${fmtTime(e.created_at)}</span></div></article>`;
     title = `${title} — ${name}`;
+  } else if (e.kind === 40 || e.kind === 41) {
+    const m = channelMeta(e);
+    title = `${plain(String(m.name || 'channel'), 60)} — chat channel by ${name}`; desc = plain(String(m.about || ''), 200);
+    body = noteCard(e, prof).replace('class="card"', 'class="card" style="font-size:17px"');
   } else {
     title = `${name}: "${plain(e.content, 60)}"`; desc = plain(e.content, 200);
     body = noteCard(e, prof).replace('class="card"', 'class="card" style="font-size:17px"');
@@ -300,7 +308,7 @@ function ftsQuery(q) {
   const words = q.split(/\s+/).filter(Boolean).slice(0, 8);
   return { long: words.filter(w => [...w].length >= 3), short: words.filter(w => [...w].length < 3) };
 }
-// ---- search filters: ?since=YYYY-MM-DD&until=YYYY-MM-DD (JST, inclusive) &author=npub1…|hex &kind=note|article
+// ---- search filters: ?since=YYYY-MM-DD&until=YYYY-MM-DD (JST, inclusive) &author=npub1…|hex &kind=note|article|chat (chat: NIP-50 mode only)
 const JST = 9 * 3600;
 const dayStart = v => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''); if (!m) return 0;
   const t = Date.UTC(+m[1], +m[2] - 1, +m[3]) / 1000 - JST; return Number.isFinite(t) && t > 0 ? t : 0; };
@@ -311,7 +319,7 @@ function parseFilters(sp) {
   if (HEX64.test(a)) f.author = a;
   else if (a.startsWith('npub1') || a.startsWith('nprofile1')) { try { const d = nip19.decode(a); f.author = d.type === 'npub' ? d.data : d.data.pubkey; } catch {} }
   else if (a.startsWith('nostr:')) { try { const d = nip19.decode(a.slice(6)); f.author = d.type === 'npub' ? d.data : d.data.pubkey; } catch {} }
-  if (sp.get('kind') === 'note' || sp.get('kind') === 'article') f.kind = sp.get('kind');
+  if (sp.get('kind') === 'note' || sp.get('kind') === 'article' || (sp.get('kind') === 'chat' && SEARCH_MODE === 'nip50')) f.kind = sp.get('kind');
   f.badAuthor = !!a && !f.author;
   return f;
 }
@@ -332,7 +340,7 @@ function filterForm(q, f) {
 <form action="/search" method="get"><input type="hidden" name="q" value="${esc(q)}">
 <label>From <input type="date" name="since" value="${f.since ? ymd(f.since) : ''}"></label>
 <label>To <input type="date" name="until" value="${f.until ? ymd(f.until) : ''}"></label>
-<label>Type <select name="kind">${sel('', 'All')}${sel('note', 'Notes (kind 1)')}${sel('article', 'Articles (kind 30023)')}</select></label>
+<label>Type <select name="kind">${sel('', 'All')}${sel('note', 'Notes (kind 1)')}${sel('article', 'Articles (kind 30023)')}${SEARCH_MODE === 'nip50' ? sel('chat', 'Chat (kind 40/41/42)') : ''}</select></label>
 <label class="wide">Author <input name="author" value="${f.author ? npubOf(f.author) : ''}" placeholder="npub1…"></label>
 <div class="presets">${[['24h', 1], ['7 days', 7], ['30 days', 30], ['1 year', 365]].map(([l, d]) =>
   `<a href="/search/${encodeURIComponent(q)}${filterQuery({ ...f, since: Math.floor(Date.now() / 1000) - d * 86400, until: 0 })}" rel="nofollow">${l}</a>`).join('')}
@@ -399,8 +407,10 @@ const hasIndex = (d, name) => cached('ix:' + name + dbIno, 600_000, () => !!d.pr
 
 // NIP-50 mode: the relay does the search. Results come newest-stored first; paging uses `until` on created_at,
 // so a page may repeat an event that shares the boundary second (deduped by id on the client side of this code).
+const KIND_SETS = { note: [1], article: [30023], chat: [40, 41, 42], all: [1, 30023, 40, 41, 42] };
+const KIND_LABEL = { note: 'notes only', article: 'articles only', chat: 'chat only' };
 async function searchRowsNip50(q, f, cursor) {
-  const base = { search: q, kinds: f.kind === 'note' ? [1] : f.kind === 'article' ? [30023] : [1, 30023], limit: PAGE * 2 };
+  const base = { search: q, kinds: KIND_SETS[f.kind || 'all'], limit: PAGE * 2 };
   if (f.since) base.since = f.since;
   const until = Math.min(f.until || Infinity, cursor ? cursor : Infinity);
   if (until !== Infinity) base.until = until;
@@ -443,7 +453,7 @@ async function searchPageNip50(q, sp) {
   const people = profPks.filter(pk => profs[pk].ev && !nsfw(profs[pk].ev) && profEvs.some(e => e.id === profs[pk].ev.id)).slice(0, 8);
   const ms = Date.now() - t0;
   const active = [f.since && 'from ' + ymd(f.since), f.until && 'to ' + ymd(f.until),
-    f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && (f.kind === 'note' ? 'notes only' : 'articles only')].filter(Boolean).join(' · ');
+    f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && KIND_LABEL[f.kind]].filter(Boolean).join(' · ');
   if (!notes.length && !people.length) return fail(`No results for <b>${esc(q)}</b>${active ? ' (' + active + ')' : ''}.`);
   let more = '';
   if (evs.length >= PAGE && notes.length) {
@@ -500,7 +510,7 @@ async function searchPage(q, sp) {
   const people = profRows.map(r => r.pk).filter(pk => profs[pk].ev && !nsfw(profs[pk].ev)).slice(0, 8);
   const ms = Date.now() - t0;
   const active = [f.since && 'from ' + ymd(f.since), f.until && 'to ' + ymd(f.until),
-    f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && (f.kind === 'note' ? 'notes only' : 'articles only')].filter(Boolean).join(' · ');
+    f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && KIND_LABEL[f.kind]].filter(Boolean).join(' · ');
   if (!notes.length && !people.length) return fail(`No results for <b>${esc(q)}</b>${active ? ' (' + active + ')' : ''}.`);
   const more = rows.length >= PAGE && shown.length ? `<div class="pager"><span></span><a href="/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: shown[shown.length - 1].r })}" rel="nofollow">older →</a></div>` : '';
   const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''} · newest first · ${ms} ms</p>

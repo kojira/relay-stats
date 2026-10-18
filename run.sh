@@ -24,6 +24,13 @@ if [ -n "$AUDIT" ] && [ -d "$AUDIT" ]; then
     nice -n 10 "$HERE/venv/bin/python" "$HERE/traffic.py" "$AUDIT" "$HERE/www" "$HERE/state/traffic" || echo "$(date '+%F %T') traffic stats failed" >&2
 fi
 nice -n 10 "$HERE/venv/bin/python" "$HERE/analyze.py" "$RELAY" "$TMP" "$HERE/www" ${BAN:+"$BAN"}
+# full-text search index for web/server.mjs (state/search/search.sqlite); opt-in with SEARCH_STRFRY in relay-stats.conf
+# (the strfry command line used to read events, e.g. "/path/strfry --config /path/strfry.conf"); never fatal
+SEARCH_STRFRY="${SEARCH_STRFRY:-$(sed -n 's/^SEARCH_STRFRY=//p' "${RELAY_STATS_CONF:-$HERE/relay-stats.conf}" 2>/dev/null | tail -1)}"
+if [ -n "$SEARCH_STRFRY" ] && [ -f "$HERE/state/search/search.sqlite" ]; then
+    SEARCH_STRFRY="$SEARCH_STRFRY" nice -n 10 "$HERE/venv/bin/python" "$HERE/search-index.py" "$HERE/state/search/search.sqlite" >&2 \
+        || echo "$(date '+%F %T') search index update failed" >&2
+fi
 # OG image (www/assets/og.png); failure must not break the stats update
 nice -n 10 "$HERE/venv/bin/python" "$HERE/og.py" "$HERE/www" || echo "$(date '+%F %T') og.png render failed" >&2
 echo "$(date '+%F %T') ok $(grep -c '^E' "$TMP") events"

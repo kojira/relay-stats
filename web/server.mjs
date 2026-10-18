@@ -201,6 +201,11 @@ main{max-width:760px;margin:0 auto;padding:18px}
 .prof h1{margin:0;font-size:22px}.banner{width:100%;max-height:200px;object-fit:cover;border-radius:10px;margin-bottom:12px}
 h1.t{font-size:24px;line-height:1.4;margin:.2em 0 .4em}.article img{max-width:100%}.article pre{overflow:auto;background:#0004;padding:10px;border-radius:6px}
 .pager{display:flex;justify-content:space-between;margin:16px 0}.hint{color:var(--dim);font-size:13px}
+.filters summary{cursor:pointer;color:var(--dim)}.filters form{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin-top:10px}
+.filters label{display:flex;flex-direction:column;font-size:12px;color:var(--dim);gap:3px}.filters label.wide{flex:1;min-width:240px}
+.filters input,.filters select{background:var(--bg);border:1px solid var(--line);color:var(--fg);padding:6px 8px;border-radius:6px;font:inherit;font-size:14px;color-scheme:dark}
+.filters button{background:var(--acc);color:#001;border:0;border-radius:6px;padding:7px 16px;font-weight:700;cursor:pointer}
+.presets{display:flex;gap:10px;font-size:13px;width:100%}
 mark{background:#ff4fd833;color:inherit;border-radius:3px}footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
 `;
 function page({ title, desc = '', canonical = '', robots = 'index,follow', og = {}, body, q = '', jsonld = null, status = 200 }) {
@@ -290,42 +295,97 @@ function ftsQuery(q) {
   const words = q.split(/\s+/).filter(Boolean).slice(0, 8);
   return { long: words.filter(w => [...w].length >= 3), short: words.filter(w => [...w].length < 3) };
 }
-async function searchPage(q, before) {
+// ---- search filters: ?since=YYYY-MM-DD&until=YYYY-MM-DD (JST, inclusive) &author=npub1…|hex &kind=note|article
+const JST = 9 * 3600;
+const dayStart = v => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''); if (!m) return 0;
+  const t = Date.UTC(+m[1], +m[2] - 1, +m[3]) / 1000 - JST; return Number.isFinite(t) && t > 0 ? t : 0; };
+function parseFilters(sp) {
+  const f = { since: dayStart(sp.get('since')), until: dayStart(sp.get('until')), author: '', kind: '' };
+  if (f.until) f.until += 86400 - 1;
+  const a = (sp.get('author') || '').trim();
+  if (HEX64.test(a)) f.author = a;
+  else if (a.startsWith('npub1') || a.startsWith('nprofile1')) { try { const d = nip19.decode(a); f.author = d.type === 'npub' ? d.data : d.data.pubkey; } catch {} }
+  else if (a.startsWith('nostr:')) { try { const d = nip19.decode(a.slice(6)); f.author = d.type === 'npub' ? d.data : d.data.pubkey; } catch {} }
+  if (sp.get('kind') === 'note' || sp.get('kind') === 'article') f.kind = sp.get('kind');
+  f.badAuthor = !!a && !f.author;
+  return f;
+}
+const ymd = t => new Date((t + JST) * 1000).toISOString().slice(0, 10);
+function filterQuery(f, extra = {}) {
+  const o = new URLSearchParams();
+  if (f.since) o.set('since', ymd(f.since));
+  if (f.until) o.set('until', ymd(f.until));
+  if (f.author) o.set('author', npubOf(f.author));
+  if (f.kind) o.set('kind', f.kind);
+  for (const [k, v] of Object.entries(extra)) o.set(k, v);
+  const s = o.toString(); return s ? '?' + s : '';
+}
+function filterForm(q, f) {
+  const sel = (v, l) => `<option value="${v}"${f.kind === v ? ' selected' : ''}>${l}</option>`;
+  const open = f.since || f.until || f.author || f.kind;
+  return `<details class="card filters"${open ? ' open' : ''}><summary>Filters${open ? ' (active)' : ''}</summary>
+<form action="/search" method="get"><input type="hidden" name="q" value="${esc(q)}">
+<label>From <input type="date" name="since" value="${f.since ? ymd(f.since) : ''}"></label>
+<label>To <input type="date" name="until" value="${f.until ? ymd(f.until) : ''}"></label>
+<label>Type <select name="kind">${sel('', 'All')}${sel('note', 'Notes (kind 1)')}${sel('article', 'Articles (kind 30023)')}</select></label>
+<label class="wide">Author <input name="author" value="${f.author ? npubOf(f.author) : ''}" placeholder="npub1…"></label>
+<div class="presets">${[['24h', 1], ['7 days', 7], ['30 days', 30], ['1 year', 365]].map(([l, d]) =>
+  `<a href="/search/${encodeURIComponent(q)}${filterQuery({ ...f, since: Math.floor(Date.now() / 1000) - d * 86400, until: 0 })}" rel="nofollow">${l}</a>`).join('')}
+${open ? `<a href="/search/${encodeURIComponent(q)}" rel="nofollow">clear</a>` : ''}</div>
+<button>Apply</button></form></details>`;
+}
+const ROWID_SHIFT = 2 ** 20;   // search-index.py: rowid = created_at << 20 | id bits
+
+async function searchPage(q, sp) {
   q = q.trim().slice(0, 100);
   if (!q) return notFound('Empty query');
   const d = sdb();
   if (!d) return notFound('Search index is not ready yet');
+  const f = parseFilters(sp), cursor = +(sp.get('cursor') || 0) || 0;
+  const head = `<p class="hint">Results for <b>${esc(q)}</b>`;
+  const title = `"${q}" · search · ${RELAY_NAME}`;
+  const fail = msg => page({ title, robots: 'noindex,follow', q, status: 404, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
+  if (f.badAuthor) return fail('Author must be an npub1… / nprofile1… or a 64-character hex pubkey.');
+  if (f.since && f.until && f.since > f.until) return fail('"From" is after "To".');
   const { long, short } = ftsQuery(q);
-  if (!long.length) return page({ title: `"${q}" · search · ${RELAY_NAME}`, robots: 'noindex,follow', q, status: 404,
-    body: `<div class="card"><p class="hint">Use at least one word of 3 or more characters.</p></div>` });
+  if (!long.length) return fail('Use at least one word of 3 or more characters.');
   const match = long.map(w => '"' + w.replace(/"/g, '""') + '"').join(' ');
-  const like = short.map(() => 'AND n.content LIKE ?').join(' ');
+  // FTS rowids are time-ordered, so the date range is a rowid range and "newest first" needs no sort
+  const lo = f.since ? f.since * ROWID_SHIFT : 0;
+  let hi = f.until ? (f.until + 1) * ROWID_SHIFT - 1 : Number.MAX_SAFE_INTEGER;
+  if (cursor) hi = Math.min(hi, cursor - 1);
+  const cond = ['n.nsfw = 0'], args = [match, lo, hi];
+  if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
+  if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
+  for (const w of short) { cond.push('n.content LIKE ?'); args.push(`%${w}%`); }
   const t0 = Date.now();
   let rows;
   try {
-    rows = d.prepare(`SELECT lower(hex(n.id)) id, lower(hex(n.pubkey)) pk, n.created_at ca FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
-      WHERE notes_fts MATCH ? AND n.nsfw = 0 ${before ? 'AND n.created_at < ?' : ''} ${like}
-      ORDER BY n.created_at DESC LIMIT ${PAGE * 3}`).all(match, ...(before ? [before] : []), ...short.map(w => `%${w}%`));
-  } catch { return notFound('Bad query'); }
+    rows = d.prepare(`SELECT f.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
+      WHERE notes_fts MATCH ? AND f.rowid BETWEEN ? AND ? AND ${cond.join(' AND ')}
+      ORDER BY f.rowid DESC LIMIT ${PAGE * 2}`).all(...args);
+  } catch (err) { console.error(new Date().toISOString(), 'search', err.message); return fail('Bad query.'); }
   const ban = bans();
   rows = rows.filter(r => !ban.has(r.pk));
-  const ids = rows.slice(0, PAGE * 2).map(r => r.id);
+  const ids = rows.slice(0, PAGE + 10).map(r => r.id);
   const evs = ids.length ? await req({ ids }) : [];
   const byId = Object.fromEntries(evs.map(e => [e.id, e]));
-  const notes = ids.map(id => byId[id]).filter(e => e && visible(e)).slice(0, PAGE);
-  // profiles matching the words (names / nip05)
-  const profRows = before ? [] : d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
+  const shown = rows.slice(0, PAGE + 10).filter(r => byId[r.id] && visible(byId[r.id])).slice(0, PAGE);
+  const notes = shown.map(r => byId[r.id]);
+  // people whose names match (only on the first, unfiltered-by-author page)
+  const profRows = cursor || f.author ? [] : d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
       WHERE profiles_fts MATCH ? LIMIT 12`).all(match).filter(r => !ban.has(r.pk));
-  const profs = await profilesOf([...notes.map(e => e.pubkey), ...profRows.map(r => r.pk)]);
+  const profs = await profilesOf([...notes.map(e => e.pubkey), ...profRows.map(r => r.pk), ...(f.author ? [f.author] : [])]);
   const people = profRows.map(r => r.pk).filter(pk => profs[pk].ev && !nsfw(profs[pk].ev)).slice(0, 8);
   const ms = Date.now() - t0;
-  if (!notes.length && !people.length) return page({ title: `"${q}" · search · ${RELAY_NAME}`, robots: 'noindex,follow', q, status: 404,
-    body: `<div class="card"><p class="hint">No results for <b>${esc(q)}</b>.</p></div>` });
-  const more = rows.length > PAGE && notes.length ? `<div class="pager"><span></span><a href="/search/${encodeURIComponent(q)}?before=${notes[notes.length - 1].created_at}" rel="nofollow">older →</a></div>` : '';
-  const body = `<p class="hint">Results for <b>${esc(q)}</b> · newest first · ${ms} ms</p>
+  const active = [f.since && 'from ' + ymd(f.since), f.until && 'to ' + ymd(f.until),
+    f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && (f.kind === 'note' ? 'notes only' : 'articles only')].filter(Boolean).join(' · ');
+  if (!notes.length && !people.length) return fail(`No results for <b>${esc(q)}</b>${active ? ' (' + active + ')' : ''}.`);
+  const more = rows.length >= PAGE && shown.length ? `<div class="pager"><span></span><a href="/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: shown[shown.length - 1].r })}" rel="nofollow">older →</a></div>` : '';
+  const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''} · newest first · ${ms} ms</p>
 ${people.length ? `<div class="card"><div class="hint" style="margin-bottom:6px">People</div>${people.map(pk => whoHtml(pk, profs[pk])).join('')}</div>` : ''}
 ${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
-  return page({ title: `"${q}" · search · ${RELAY_NAME}`, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
+  return page({ title, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
 }
 
 function robots() {
@@ -376,9 +436,10 @@ async function route(u) {
   if ((m = p.match(/^\/sitemap-(\d+|profiles)\.xml$/))) return cached('sm' + m[1], 3600_000, () => sitemap(m[1] === 'profiles' ? 'profiles' : +m[1]));
   if (p === '/search' || p === '/search/') {
     const q = (u.searchParams.get('q') || '').trim();
-    return q ? [301, '', '', `/search/${encodeURIComponent(q)}`] : notFound('Empty query');
+    const rest = new URLSearchParams([...u.searchParams].filter(([k, v]) => k !== 'q' && v !== ''));
+    return q ? [301, '', '', `/search/${encodeURIComponent(q)}${rest.size ? '?' + rest : ''}`] : notFound('Empty query');
   }
-  if ((m = p.match(/^\/search\/(.+)$/))) return searchPage(m[1], +(u.searchParams.get('before') || 0) || 0);
+  if ((m = p.match(/^\/search\/(.+)$/))) return searchPage(m[1], u.searchParams);
   if ((m = p.match(/^\/npub\/([0-9a-f]{64})$/))) return [301, '', '', '/' + npubOf(m[1])];
   if ((m = p.match(/^\/event\/([0-9a-f]{64})$/))) return [301, '', '', '/' + noteOf(m[1])];
   if ((m = p.match(/^\/(npub1[02-9ac-hj-np-z]{58})$/))) {

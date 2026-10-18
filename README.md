@@ -71,6 +71,12 @@ njump.me と同じ形の URL で、投稿・記事・プロフィールのペー
 - 検索:
   - `search-index.py` が kind 1・30023 の本文と、kind 0 の名前を SQLite FTS5（trigram）に入れる。
   - 3文字以上の語で検索し、2文字以下の語は絞り込みにだけ使う。
+  - 絞り込み（URL のパラメータ。検索ページの「Filters」からも指定できる）:
+    - `since=YYYY-MM-DD`、`until=YYYY-MM-DD`：期間（日本時間、両端の日を含む）
+    - `author=npub1…`：投稿者（nprofile1… と hex も可）
+    - `kind=note`（kind 1）、`kind=article`（kind 30023）
+    - 例：`/search/nostr?since=2026-01-01&until=2026-03-31&kind=note`
+  - 索引の rowid は「created_at << 20 | id の一部」で、時刻順に並ぶ。期間指定を rowid の範囲で絞るので、新しい順の並べ替えが要らない。
   - 接続元ごとに回数を制限する（1分あたり、ページ表示120回か検索30回まで）。
 - 構成:
   - `web/server.mjs`（Node 22.5 以上、`node:sqlite` を使う）が 127.0.0.1:7780 で動く。投稿はリレーに WebSocket で取りにいき、LMDB は直接開かない。

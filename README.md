@@ -96,6 +96,12 @@ njump.me と同じ形の URL で、投稿・記事・プロフィールのペー
   SEARCH_STRFRY="..." ./venv/bin/python search-index.py state/search/build.sqlite --full && mv state/search/build.sqlite state/search/search.sqlite
   cp web/launchd/io.kojira.relay-stats-web.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.kojira.relay-stats-web.plist
   ```
+  索引は大きい（r で約9GB）。本体のディスクではなく外付けディスクに置き、`state/search` をそこへのシンボリックリンクにする。
+  launchd のジョブは macOS のプライバシー保護（TCC）で外付けディスクを読めないことがあるので、そのときは launchd を使わず、`web/web-loop.sh` を nohup で起動する（終了したら再起動する）。
+  ```sh
+  ln -s /Volumes/<外付け>/relay-stats-search state/search
+  (cd web && WEB_SEARCH_DB=$PWD/../state/search/search.sqlite WEB_BANLIST=... nohup ./web-loop.sh </dev/null >/dev/null 2>&1 &)
+  ```
   cloudflared の設定例（strfry への規則より前に置く）:
   ```yaml
   - hostname: r.kojira.io

@@ -220,7 +220,7 @@ ${og.image ? `<meta property="og:image" content="${esc(og.image)}">` : `<meta pr
 ${jsonld ? `<script type="application/ld+json">${JSON.stringify(jsonld).replace(/</g, '\\u003c')}</script>` : ''}
 <style>${CSS}</style></head><body>
 <header><a class="brand" href="/">${esc(RELAY_NAME.toUpperCase())}</a>
-<form action="/search" method="get" role="search"><input name="q" value="${esc(q)}" placeholder="Search notes and articles (3+ characters)" aria-label="search"><button>Search</button></form></header>
+<form action="/search" method="get" role="search"><input name="q" value="${esc(q)}" placeholder="Search notes and articles" aria-label="search"><button>Search</button></form></header>
 <main>${body}</main><footer>Nostr events stored on wss://${esc(RELAY_NAME)} · <a href="/">relay stats</a></footer></body></html>`];
 }
 const notFound = (msg = 'Not found') => page({ title: `404 · ${RELAY_NAME}`, robots: 'noindex', status: 404,
@@ -235,7 +235,7 @@ function noteCard(e, prof, hl = '') {
   const title = e.kind === 30023 ? ((e.tags.find(t => t[0] === 'title') || [])[1] || '') : '';
   let text = e.kind === 30023 ? plain(((e.tags.find(t => t[0] === 'summary') || [])[1]) || e.content, 280) : e.content;
   let body = richText(text);
-  if (hl) for (const w of hl.split(/\s+/).filter(w => w.length >= 2)) {
+  if (hl) for (const w of hl.split(/\s+/).filter(w => w.length >= 1)) {
     const re = new RegExp('(' + esc(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')(?![^<]*>)', 'gi');
     body = body.replace(re, '<mark>$1</mark>');
   }
@@ -341,7 +341,34 @@ const likeArg = w => '%' + w.replace(/[\\%_]/g, c => '\\' + c) + '%';
 // that author's / all articles, newest first, with LIKE on the text (same case-insensitivity as trigram
 // for ASCII). Cut-over: the filter set is small (<= DIRECT_MAX rows).
 const DIRECT_MAX = 60000;
+// 1-2 character words: trigram FTS cannot match them; search-index.py builds short_hits for the words in
+// short-terms.txt and for words searched often (queries.log written here: time and word only)
+const QUERY_LOG = path.join(path.dirname(SEARCH_DB), 'queries.log');
+const builtShort = d => cached('st:' + dbIno, 300_000, () => {
+  try { return new Set(d.prepare('SELECT term FROM short_terms WHERE hits >= 0').all().map(r => r.term)); } catch { return new Set(); }
+});
+const seenShort = new Map();               // ip|word -> day, so one client counts once a day per word (memory only)
+function logShortQuery(words, ip) {
+  const day = Math.floor(Date.now() / 86400_000);
+  if (seenShort.size > 50000) seenShort.clear();
+  const lines = words.filter(w => { const k = ip + '|' + w; if (seenShort.get(k) === day) return false; seenShort.set(k, day); return true; })
+    .map(w => `${Math.floor(Date.now() / 1000)}\t${w.replace(/[\t\n\r]/g, ' ')}\n`).join('');
+  if (lines) fs.appendFile(QUERY_LOG, lines, () => {});
+}
 function searchRows(d, match, long, short, lo, hi, f) {
+  if (!long.length) {
+    // short words only (all built): walk the rarest word's hit list, newest first
+    const terms = short.map(w => w.replace(/[A-Z]/g, c => c.toLowerCase()));
+    const counts = terms.map(t => d.prepare('SELECT hits FROM short_terms WHERE term = ?').get(t)?.hits ?? 0);
+    const t = terms[counts.indexOf(Math.min(...counts))];
+    const cond = ['n.nsfw = 0'], args = [t, lo, hi];
+    if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
+    if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
+    for (const w of terms.filter(w => w !== t)) { cond.push("n.content LIKE ? ESCAPE '\\'"); args.push(likeArg(w)); }
+    return d.prepare(`SELECT n.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM short_hits h JOIN notes n ON n.rowid = h.rowid_
+      WHERE h.term = ? AND h.rowid_ BETWEEN ? AND ? AND ${cond.join(' AND ')}
+      ORDER BY h.rowid_ DESC LIMIT ${PAGE * 2}`).all(...args);
+  }
   const cond = ['n.nsfw = 0'], args = [];
   if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
   if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
@@ -377,7 +404,12 @@ async function searchPage(q, sp) {
   if (f.badAuthor) return fail('Author must be an npub1… / nprofile1… or a 64-character hex pubkey.');
   if (f.since && f.until && f.since > f.until) return fail('"From" is after "To".');
   const { long, short } = ftsQuery(q);
-  if (!long.length) return fail('Use at least one word of 3 or more characters.');
+  const shortBuilt = builtShort(d);
+  const missing = short.map(w => w.replace(/[A-Z]/g, c => c.toLowerCase())).filter(w => !shortBuilt.has(w));
+  if (!long.length && missing.length) {
+    logShortQuery(missing, sp.ip);
+    return fail(`Words of 1–2 characters (${missing.map(esc).join(', ')}) are not indexed yet. Words searched often are indexed automatically within a few hours (single letters and very common words are not); words of 3 or more characters always work.`);
+  }
   const match = long.map(w => '"' + w.replace(/"/g, '""') + '"').join(' ');
   // FTS rowids are time-ordered, so the date range is a rowid range and "newest first" needs no sort
   const lo = f.since ? f.since * ROWID_SHIFT : 0;
@@ -396,7 +428,7 @@ async function searchPage(q, sp) {
   const shown = rows.slice(0, PAGE + 10).filter(r => byId[r.id] && visible(byId[r.id])).slice(0, PAGE);
   const notes = shown.map(r => byId[r.id]);
   // people whose names match (only on the first, unfiltered-by-author page)
-  const profRows = cursor || f.author ? [] : d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
+  const profRows = cursor || f.author || !long.length ? [] : d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
       WHERE profiles_fts MATCH ? LIMIT 12`).all(match).filter(r => !ban.has(r.pk));
   const profs = await profilesOf([...notes.map(e => e.pubkey), ...profRows.map(r => r.pk), ...(f.author ? [f.author] : [])]);
   const people = profRows.map(r => r.pk).filter(pk => profs[pk].ev && !nsfw(profs[pk].ev)).slice(0, 8);
@@ -451,7 +483,7 @@ function limited(ip, cost) {
   return b.n > 120;            // 120 cost units per minute: a page costs 1, a search 4 (so 30 searches)
 }
 
-async function route(u) {
+async function route(u, ip) {
   const p = decodeURIComponent(u.pathname);
   if (p === '/robots.txt') return robots();
   if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemap(null));
@@ -462,7 +494,7 @@ async function route(u) {
     const rest = new URLSearchParams([...u.searchParams].filter(([k, v]) => k !== 'q' && v !== ''));
     return q ? [301, '', '', `/search/${encodeURIComponent(q)}${rest.size ? '?' + rest : ''}`] : notFound('Empty query');
   }
-  if ((m = p.match(/^\/search\/(.+)$/))) return searchPage(m[1], u.searchParams);
+  if ((m = p.match(/^\/search\/(.+)$/))) { const sp = u.searchParams; sp.ip = ip; return searchPage(m[1], sp); }
   if ((m = p.match(/^\/npub\/([0-9a-f]{64})$/))) return [301, '', '', '/' + npubOf(m[1])];
   if ((m = p.match(/^\/event\/([0-9a-f]{64})$/))) return [301, '', '', '/' + noteOf(m[1])];
   if ((m = p.match(/^\/(npub1[02-9ac-hj-np-z]{58})$/))) {
@@ -485,7 +517,7 @@ http.createServer(async (rq, rs) => {
     rs.writeHead(429, { 'content-type': 'text/plain', 'retry-after': '60' }).end('Too many requests'); return;
   }
   let out;
-  try { out = await route(u); } catch (err) { console.error(new Date().toISOString(), u.pathname, err); out = [503, 'temporarily unavailable', 'text/plain']; }
+  try { out = await route(u, ip); } catch (err) { console.error(new Date().toISOString(), u.pathname, err); out = [503, 'temporarily unavailable', 'text/plain']; }
   const [status, body, type = 'text/html; charset=utf-8', loc] = out;
   const h = { 'content-type': type, 'x-content-type-options': 'nosniff' };
   if (loc) h.location = loc;

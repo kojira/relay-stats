@@ -13,6 +13,10 @@ Tables
         rowid range;  id BLOB, pubkey BLOB, kind, created_at, d, nsfw, content)  + notes_fts (contentless trigram)
   profiles(rowid, pubkey BLOB, created_at, name, display_name, nip05, picture, about) + profiles_fts
   meta(k, v)
+  short_terms(term, built_at, hits) + short_hits(term, rowid)
+        index for 1-2 character words, which trigram FTS cannot match. Terms come from short-terms.txt
+        (always) and from state/search/queries.log (words the web server could not answer; built once
+        searched >= SHORT_MIN_SEARCHES times in SHORT_WINDOW). New notes are added to every built term.
 Kind 30023 keeps only the newest version per (pubkey, d). Banned pubkeys are filtered by the reader
 (web/server.mjs), so a ban / unban takes effect without re-indexing. NSFW = content-warning tag,
 "nsfw" t / l tag, or #nsfw in the text; flagged rows stay in the table but are never shown in search.
@@ -22,6 +26,14 @@ import json, os, re, shlex, sqlite3, subprocess, sys, time
 KINDS_TEXT = (1, 30023)
 SLACK = 2 * 86400
 MAX_CONTENT = 100_000
+SHORT_MIN_SEARCHES = 3            # searches within SHORT_WINDOW before a short word gets its own index
+SHORT_WINDOW = 7 * 86400
+SHORT_NEW_PER_RUN = 5             # at most this many new short words per run (each is one pass over the notes)
+SHORT_MAX_TERMS = 300
+SHORT_MAX_HITS = 1_000_000        # a word in more notes than this is not indexed (too common to be useful)
+HERE = os.path.dirname(os.path.abspath(__file__))
+ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")   # same folding as SQL LIKE
+SHORT_TERMS = []                  # built short words (lower-cased), filled by main()
 NSFW_RE = re.compile(r"(?:^|[\s#＃])#nsfw\b|＃nsfw\b", re.I)
 
 
@@ -53,6 +65,9 @@ def open_db(path):
         name TEXT, display_name TEXT, nip05 TEXT, picture TEXT, about TEXT);
     CREATE VIRTUAL TABLE IF NOT EXISTS profiles_fts USING fts5(names, content='', contentless_delete=1, tokenize='trigram');
     CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+    CREATE TABLE IF NOT EXISTS short_terms(term TEXT PRIMARY KEY, built_at INTEGER NOT NULL, hits INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS short_hits(term TEXT NOT NULL, rowid_ INTEGER NOT NULL, PRIMARY KEY(term, rowid_)) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS short_hits_row ON short_hits(rowid_);
     """)
     return db
 
@@ -92,6 +107,11 @@ def put_note(db, e):
     db.execute("INSERT INTO notes(rowid, id, pubkey, kind, created_at, d, nsfw, content) VALUES(?,?,?,?,?,?,?,?)",
                (rowid, eid, pk, e["kind"], e["created_at"], d, is_nsfw(e), content))
     db.execute("INSERT INTO notes_fts(rowid, content) VALUES(?,?)", (rowid, content))
+    if SHORT_TERMS:
+        low = content.translate(ASCII_LOWER)
+        for t in SHORT_TERMS:
+            if t in low:
+                db.execute("INSERT OR IGNORE INTO short_hits(term, rowid_) VALUES(?,?)", (t, rowid))
     return 1
 
 
@@ -101,6 +121,7 @@ def time_rowid(created_at, eid):
 
 
 def delete_rowid(db, rowid):
+    db.execute("DELETE FROM short_hits WHERE rowid_=?", (rowid,))
     db.execute("DELETE FROM notes_fts WHERE rowid=?", (rowid,))
     db.execute("DELETE FROM notes WHERE rowid=?", (rowid,))
 
@@ -147,6 +168,49 @@ def apply_deletion(db, e):
     return n
 
 
+def short_wanted(db):
+    """short words to build: short-terms.txt + words searched often enough (queries.log), not built yet"""
+    want = []
+    try:
+        with open(os.path.join(HERE, "short-terms.txt"), encoding="utf-8") as f:
+            want += [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    except OSError:
+        pass
+    counts, cut = {}, time.time() - SHORT_WINDOW
+    try:
+        with open(os.path.join(HERE, "state", "search", "queries.log"), encoding="utf-8") as f:
+            for line in f:                       # "<unix time>\t<word>"
+                ts, _, w = line.rstrip("\n").partition("\t")
+                if w and ts.isdigit() and int(ts) >= cut:
+                    counts[w] = counts.get(w, 0) + 1
+    except OSError:
+        pass
+    want += [w for w, c in sorted(counts.items(), key=lambda x: -x[1]) if c >= SHORT_MIN_SEARCHES]
+    built = {r[0] for r in db.execute("SELECT term FROM short_terms")}
+    out = []
+    for w in want:
+        w = w.translate(ASCII_LOWER)
+        if len(w) == 1 and w.isascii():          # single ASCII letters / digits / symbols: in nearly every note
+            continue
+        if 1 <= len(w) <= 2 and not w.isspace() and w not in built and w not in out:
+            out.append(w)
+    return out[:max(0, min(SHORT_NEW_PER_RUN, SHORT_MAX_TERMS - len(built)))]
+
+
+def build_short(db, term):
+    t0 = time.time()
+    like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    db.execute("BEGIN")
+    db.execute("INSERT OR IGNORE INTO short_hits(term, rowid_) SELECT ?, rowid FROM notes WHERE content LIKE ? ESCAPE '\\'", (term, like))
+    n = db.execute("SELECT count(*) FROM short_hits WHERE term=?", (term,)).fetchone()[0]
+    if n > SHORT_MAX_HITS:                     # too common: drop the list, remember the word so it is not retried
+        db.execute("DELETE FROM short_hits WHERE term=?", (term,))
+        n = -n
+    db.execute("INSERT OR REPLACE INTO short_terms(term, built_at, hits) VALUES(?,?,?)", (term, int(time.time()), n))
+    db.execute("COMMIT")
+    print(f"{time.strftime('%F %T')} search-index: short word {term!r}: {n} notes ({time.time() - t0:.0f}s)", flush=True)
+
+
 def main():
     path = sys.argv[1]
     full = "--full" in sys.argv[2:]
@@ -158,6 +222,7 @@ def main():
     since = 0 if full else int(last[0]) - SLACK
     flt = lambda kinds: {"kinds": list(kinds), **({"since": since} if since else {})}
     stats = {"notes": 0, "profiles": 0, "deleted": 0}
+    SHORT_TERMS[:] = [r[0] for r in db.execute("SELECT term FROM short_terms WHERE hits >= 0")]
     t0 = time.time()
     for kinds, fn, key in ((KINDS_TEXT, put_note, "notes"), ((0,), put_profile, "profiles")):
         db.execute("BEGIN")
@@ -182,6 +247,8 @@ def main():
                 continue
         db.execute("COMMIT")
     db.execute("INSERT OR REPLACE INTO meta(k, v) VALUES('last_run', ?)", (str(started),))
+    for term in short_wanted(db):                 # after the notes are in, so a new word covers everything
+        build_short(db, term)
     if full:
         db.execute("INSERT INTO notes_fts(notes_fts) VALUES('optimize')")
         db.execute("INSERT INTO profiles_fts(profiles_fts) VALUES('optimize')")

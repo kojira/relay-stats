@@ -46,6 +46,7 @@ def open_db(path):
         kind INTEGER NOT NULL, created_at INTEGER NOT NULL, d TEXT, nsfw INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS notes_created ON notes(created_at);
     CREATE INDEX IF NOT EXISTS notes_author ON notes(pubkey, created_at);
+    CREATE INDEX IF NOT EXISTS notes_kind ON notes(kind) WHERE kind = 30023;
     CREATE UNIQUE INDEX IF NOT EXISTS notes_addr ON notes(pubkey, d) WHERE kind = 30023;
     CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(content, content='', contentless_delete=1, tokenize='trigram');
     CREATE TABLE IF NOT EXISTS profiles(rowid INTEGER PRIMARY KEY, pubkey BLOB UNIQUE NOT NULL, created_at INTEGER NOT NULL,

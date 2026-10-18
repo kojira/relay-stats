@@ -334,7 +334,36 @@ function filterForm(q, f) {
 ${open ? `<a href="/search/${encodeURIComponent(q)}" rel="nofollow">clear</a>` : ''}</div>
 <button>Apply</button></form></details>`;
 }
-const ROWID_SHIFT = 2 ** 20;   // search-index.py: rowid = created_at << 20 | id bits
+const ROWID_SHIFT = 2 ** 20;
+const likeArg = w => '%' + w.replace(/[\\%_]/g, c => '\\' + c) + '%';
+// Query planning. The FTS walk (newest first) is fast when matches are dense, but with a narrow filter
+// (an author, articles only) most matches are thrown away. A narrow filter is scanned directly instead:
+// that author's / all articles, newest first, with LIKE on the text (same case-insensitivity as trigram
+// for ASCII). Cut-over: the filter set is small (<= DIRECT_MAX rows).
+const DIRECT_MAX = 60000;
+function searchRows(d, match, long, short, lo, hi, f) {
+  const cond = ['n.nsfw = 0'], args = [];
+  if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
+  if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
+  for (const w of short) { cond.push("n.content LIKE ? ESCAPE '\\'"); args.push(likeArg(w)); }
+  let direct = '';
+  if (f.author) {
+    const c = d.prepare('SELECT count(*) c FROM notes WHERE pubkey = unhex(?)').get(f.author).c;
+    if (c <= DIRECT_MAX) direct = 'notes_author';
+  }
+  if (!direct && f.kind === 'article' && hasIndex(d, 'notes_kind')) direct = 'notes_kind';
+  if (direct) {
+    const likes = long.map(() => "n.content LIKE ? ESCAPE '\\'");
+    return d.prepare(`SELECT n.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM notes n INDEXED BY ${direct}
+      WHERE n.rowid BETWEEN ? AND ? AND ${[...cond, ...likes].join(' AND ')}
+      ORDER BY ${direct === 'notes_author' ? 'n.created_at DESC, n.rowid DESC' : 'n.kind DESC, n.rowid DESC'} LIMIT ${PAGE * 2}`)
+      .all(lo, hi, ...args, ...long.map(likeArg));
+  }
+  return d.prepare(`SELECT f.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
+      WHERE notes_fts MATCH ? AND f.rowid BETWEEN ? AND ? AND ${cond.join(' AND ')}
+      ORDER BY f.rowid DESC LIMIT ${PAGE * 2}`).all(match, lo, hi, ...args);
+}
+const hasIndex = (d, name) => cached('ix:' + name + dbIno, 600_000, () => !!d.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(name));   // search-index.py: rowid = created_at << 20 | id bits
 
 async function searchPage(q, sp) {
   q = q.trim().slice(0, 100);
@@ -354,16 +383,10 @@ async function searchPage(q, sp) {
   const lo = f.since ? f.since * ROWID_SHIFT : 0;
   let hi = f.until ? (f.until + 1) * ROWID_SHIFT - 1 : Number.MAX_SAFE_INTEGER;
   if (cursor) hi = Math.min(hi, cursor - 1);
-  const cond = ['n.nsfw = 0'], args = [match, lo, hi];
-  if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
-  if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
-  for (const w of short) { cond.push('n.content LIKE ?'); args.push(`%${w}%`); }
   const t0 = Date.now();
   let rows;
   try {
-    rows = d.prepare(`SELECT f.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
-      WHERE notes_fts MATCH ? AND f.rowid BETWEEN ? AND ? AND ${cond.join(' AND ')}
-      ORDER BY f.rowid DESC LIMIT ${PAGE * 2}`).all(...args);
+    rows = cached('sq:' + JSON.stringify([match, short, lo, hi, f.author, f.kind]), 60_000, () => searchRows(d, match, long, short, lo, hi, f));
   } catch (err) { console.error(new Date().toISOString(), 'search', err.message); return fail('Bad query.'); }
   const ban = bans();
   rows = rows.filter(r => !ban.has(r.pk));

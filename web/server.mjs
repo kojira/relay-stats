@@ -7,13 +7,14 @@
 //   /robots.txt, /sitemap.xml, /sitemap-<n>.xml
 // Everything else is 404 (nprofile / nevent / naddr included).
 //
-// Events are read from the relay over its own WebSocket (never the LMDB directly); search uses the
-// SQLite FTS5 index built by search-index.py. Hidden (404): banned pubkeys (re-read from the banlist
+// Events are read from the relay over its own WebSocket (never the LMDB directly). Search uses either the
+// SQLite FTS5 index built by search-index.py (WEB_SEARCH=sqlite, default) or NIP-50 search filters sent to
+// the relay itself (WEB_SEARCH=nip50: no separate index; the sitemap is then built from relay REQs too). Hidden (404): banned pubkeys (re-read from the banlist
 // file when it changes), deleted events, and events / profiles flagged NSFW (content-warning tag,
 // "nsfw" t / l tag, #nsfw in the text).
 //
 // env: WEB_PORT (7780), WEB_RELAY_WS (ws://127.0.0.1:7777), WEB_BASE (required, e.g. https://relay.example.com),
-//      WEB_SEARCH_DB (../state/search/search.sqlite), WEB_BANLIST (hex pubkeys, one per line), WEB_RELAY_NAME (host of WEB_BASE)
+//      WEB_SEARCH (sqlite | nip50), WEB_SEARCH_DB (../state/search/search.sqlite), WEB_BANLIST (hex pubkeys, one per line), WEB_RELAY_NAME (host of WEB_BASE)
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -29,6 +30,7 @@ const RELAY_WS = process.env.WEB_RELAY_WS || 'ws://127.0.0.1:7777';
 if (!process.env.WEB_BASE) { console.error('WEB_BASE is required (public URL of the relay, e.g. https://relay.example.com)'); process.exit(1); }
 const BASE = process.env.WEB_BASE.replace(/\/$/, '');
 const RELAY_NAME = process.env.WEB_RELAY_NAME || new URL(BASE).host;
+const SEARCH_MODE = process.env.WEB_SEARCH === 'nip50' ? 'nip50' : 'sqlite';
 const SEARCH_DB = process.env.WEB_SEARCH_DB || path.join(HERE, '..', 'state', 'search', 'search.sqlite');
 const BANLIST = process.env.WEB_BANLIST || '';
 const PAGE = 30, SITEMAP_PAGE = 45000;
@@ -77,7 +79,8 @@ function relay() {
     const p = pending.get(d[1]);
     if (!p) return;
     if (d[0] === 'EVENT') p.events.push(d[2]);
-    else if (d[0] === 'EOSE' || d[0] === 'CLOSED') { ws.send(JSON.stringify(['CLOSE', d[1]])); pending.delete(d[1]); clearTimeout(p.t); p.res(p.events); }
+    else if (d[0] === 'EOSE' || d[0] === 'CLOSED') {
+      if (d[0] === 'CLOSED') p.events.closed = String(d[2] || 'closed'); ws.send(JSON.stringify(['CLOSE', d[1]])); pending.delete(d[1]); clearTimeout(p.t); p.res(p.events); }
   });
   ws.addEventListener('close', () => { for (const [k, p] of pending) { clearTimeout(p.t); p.res(p.events); pending.delete(k); } ws = null; });
   return wsReady;
@@ -87,6 +90,7 @@ async function req(...filters) {
   const id = 'w' + (++subSeq);
   return new Promise(res => {
     const p = { events: [], res, t: setTimeout(() => { pending.delete(id); res(p.events); }, 8000) };
+    p.closed = null;
     pending.set(id, p);
     ws.send(JSON.stringify(['REQ', id, ...filters]));
   });
@@ -393,9 +397,70 @@ function searchRows(d, match, long, short, lo, hi, f) {
 }
 const hasIndex = (d, name) => cached('ix:' + name + dbIno, 600_000, () => !!d.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(name));   // search-index.py: rowid = created_at << 20 | id bits
 
+// NIP-50 mode: the relay does the search. Results come newest-stored first; paging uses `until` on created_at,
+// so a page may repeat an event that shares the boundary second (deduped by id on the client side of this code).
+async function searchRowsNip50(q, f, cursor) {
+  const base = { search: q, kinds: f.kind === 'note' ? [1] : f.kind === 'article' ? [30023] : [1, 30023], limit: PAGE * 2 };
+  if (f.since) base.since = f.since;
+  const until = Math.min(f.until || Infinity, cursor ? cursor : Infinity);
+  if (until !== Infinity) base.until = until;
+  if (f.author) base.authors = [f.author];
+  const evs = await req(base);
+  if (evs.closed) throw new Error(evs.closed);
+  return evs;
+}
+
+async function searchPageNip50(q, sp) {
+  const f = parseFilters(sp), cursor = +(sp.get('cursor') || 0) || 0;
+  const head = `<p class="hint">Results for <b>${esc(q)}</b>`;
+  const title = `"${q}" · search · ${RELAY_NAME}`;
+  const fail = msg => page({ title, robots: 'noindex,follow', q, status: 404, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
+  if (f.badAuthor) return fail('Author must be an npub1… / nprofile1… or a 64-character hex pubkey.');
+  if (f.since && f.until && f.since > f.until) return fail('"From" is after "To".');
+  const t0 = Date.now();
+  let evs, profEvs = [];
+  try {
+    evs = await cached('n5:' + JSON.stringify([q, f.since, f.until, f.author, f.kind, cursor]), 60_000, () => searchRowsNip50(q, f, cursor));
+    if (!cursor && !f.author) profEvs = await cached('n5p:' + q, 60_000, () => req({ search: q, kinds: [0], limit: 12 }));
+  } catch (err) {
+    cache.delete('n5:' + JSON.stringify([q, f.since, f.until, f.author, f.kind, cursor]));
+    console.error(new Date().toISOString(), 'search', err.message);
+    return fail(/no searchable terms/.test(err.message) ? 'Please enter words to search for.' : 'Bad query.');
+  }
+  const seen = new Set(sp.getAll('seen'));
+  const sorted = [...evs].sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1));
+  const shownAll = sorted.filter(e => !seen.has(e.id) && visible(e));
+  // strfry removes events deleted by their author (NIP-09) on write, but check in one REQ in case a deletion
+  // arrived before the event (some relays sync in that order)
+  const cand = shownAll.slice(0, PAGE + 10);
+  const dels = cand.length ? await req({ kinds: [5], '#e': cand.map(e => e.id), limit: cand.length * 2 }) : [];
+  const deleted = new Set(dels.flatMap(d => d.tags.filter(t => t[0] === 'e' && cand.some(e => e.id === t[1] && e.pubkey === d.pubkey)).map(t => t[1])));
+  const notes = cand.filter(e => !deleted.has(e.id)).slice(0, PAGE);
+  const ban = bans();
+  const profPks = [...new Set(profEvs.filter(e => !ban.has(e.pubkey) && !nsfw(e) && verifyEvent(e)).map(e => e.pubkey))];
+  const profs = await profilesOf([...notes.map(e => e.pubkey), ...profPks, ...(f.author ? [f.author] : [])]);
+  // the newest kind 0 must still match (an old profile version may be what matched)
+  const people = profPks.filter(pk => profs[pk].ev && !nsfw(profs[pk].ev) && profEvs.some(e => e.id === profs[pk].ev.id)).slice(0, 8);
+  const ms = Date.now() - t0;
+  const active = [f.since && 'from ' + ymd(f.since), f.until && 'to ' + ymd(f.until),
+    f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && (f.kind === 'note' ? 'notes only' : 'articles only')].filter(Boolean).join(' · ');
+  if (!notes.length && !people.length) return fail(`No results for <b>${esc(q)}</b>${active ? ' (' + active + ')' : ''}.`);
+  let more = '';
+  if (evs.length >= PAGE && notes.length) {
+    const last = notes[notes.length - 1];
+    const sameSecond = notes.filter(e => e.created_at === last.created_at).map(e => e.id);
+    more = `<div class="pager"><span></span><a href="/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: last.created_at })}${sameSecond.map(id => '&seen=' + id).join('')}" rel="nofollow">older →</a></div>`;
+  }
+  const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''} · newest first · ${ms} ms</p>
+${people.length ? `<div class="card"><div class="hint" style="margin-bottom:6px">People</div>${people.map(pk => whoHtml(pk, profs[pk])).join('')}</div>` : ''}
+${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
+  return page({ title, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
+}
+
 async function searchPage(q, sp) {
   q = q.trim().slice(0, 100);
   if (!q) return notFound('Empty query');
+  if (SEARCH_MODE === 'nip50') return searchPageNip50(q, sp);
   const d = sdb();
   if (!d) return notFound('Search index is not ready yet');
   const f = parseFilters(sp), cursor = +(sp.get('cursor') || 0) || 0;
@@ -447,6 +512,45 @@ ${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
 function robots() {
   return [200, `User-agent: *\nAllow: /\nDisallow: /search\nDisallow: /*?until=\nSitemap: ${BASE}/sitemap.xml\n`, 'text/plain; charset=utf-8'];
 }
+// NIP-50 mode has no local index, so the sitemap is built from relay REQs: one file per JST day (last 365 days)
+// with that day's notes and articles, plus the authors of recent profiles. Each is cached for an hour.
+async function reqAll(filter, max) {
+  const out = [], seen = new Set();
+  let until = filter.until;
+  while (out.length < max) {
+    const evs = await req({ ...filter, ...(until !== undefined ? { until } : {}), limit: 1000 });
+    if (evs.closed) break;
+    let added = 0;
+    for (const e of evs) if (!seen.has(e.id)) { seen.add(e.id); out.push(e); added++; }
+    if (evs.length < 1000 || !added) break;
+    until = Math.min(...evs.map(e => e.created_at));
+  }
+  return out;
+}
+const dayKey = t => ymd(t);
+async function sitemapNip50(n) {
+  const now = Math.floor(Date.now() / 1000), today = dayStart(ymd(now));
+  const xml = (tag, items) => [200, `<?xml version="1.0" encoding="UTF-8"?><${tag} xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${items.join('')}</${tag}>`, 'application/xml'];
+  if (n === null) {
+    const xs = Array.from({ length: 365 }, (_, i) => `<sitemap><loc>${BASE}/sitemap-${dayKey(today - i * 86400)}.xml</loc></sitemap>`);
+    xs.push(`<sitemap><loc>${BASE}/sitemap-profiles.xml</loc></sitemap>`);
+    return xml('sitemapindex', xs);
+  }
+  const ban = bans();
+  if (n === 'profiles') {
+    const evs = await reqAll({ kinds: [0], since: now - 365 * 86400 }, SITEMAP_PAGE);
+    const best = {};
+    for (const e of evs) if (!best[e.pubkey] || best[e.pubkey].created_at < e.created_at) best[e.pubkey] = e;
+    return xml('urlset', Object.values(best).filter(e => !ban.has(e.pubkey) && !nsfw(e))
+      .map(e => `<url><loc>${BASE}/${npubOf(e.pubkey)}</loc><lastmod>${isoTime(e.created_at).slice(0, 10)}</lastmod></url>`));
+  }
+  const start = dayStart(n);
+  if (!start || start > today || start <= today - 365 * 86400) return [404, 'not found', 'text/plain'];
+  const evs = await reqAll({ kinds: [1, 30023], since: start, until: start + 86400 - 1 }, SITEMAP_PAGE);
+  return xml('urlset', evs.filter(e => !ban.has(e.pubkey) && !nsfw(e))
+    .map(e => `<url><loc>${BASE}/${noteOf(e.id)}</loc><lastmod>${isoTime(e.created_at).slice(0, 10)}</lastmod></url>`));
+}
+
 function sitemap(n) {
   const d = sdb();
   if (!d) return [404, 'not ready', 'text/plain'];
@@ -487,8 +591,12 @@ function limited(ip, cost) {
 async function route(u, ip) {
   const p = decodeURIComponent(u.pathname);
   if (p === '/robots.txt') return robots();
-  if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemap(null));
   let m;
+  if (SEARCH_MODE === 'nip50') {
+    if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemapNip50(null));
+    if ((m = p.match(/^\/sitemap-(\d{4}-\d{2}-\d{2}|profiles)\.xml$/))) return cached('sm' + m[1], 3600_000, () => sitemapNip50(m[1]));
+  }
+  if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemap(null));
   if ((m = p.match(/^\/sitemap-(\d+|profiles)\.xml$/))) return cached('sm' + m[1], 3600_000, () => sitemap(m[1] === 'profiles' ? 'profiles' : +m[1]));
   if (p === '/search' || p === '/search/') {
     const q = (u.searchParams.get('q') || '').trim();
@@ -524,4 +632,4 @@ http.createServer(async (rq, rs) => {
   if (loc) h.location = loc;
   if (status === 200) h['cache-control'] = u.pathname.startsWith('/search') ? 'public, max-age=60' : 'public, max-age=300';
   rs.writeHead(status, h).end(rq.method === 'HEAD' ? undefined : body);
-}).listen(PORT, '127.0.0.1', () => console.log(`relay-stats web on 127.0.0.1:${PORT} -> ${RELAY_WS}, index ${SEARCH_DB}`));
+}).listen(PORT, '127.0.0.1', () => console.log(`relay-stats web on 127.0.0.1:${PORT} -> ${RELAY_WS}, search ${SEARCH_MODE === 'nip50' ? 'NIP-50 via relay' : 'index ' + SEARCH_DB}`));

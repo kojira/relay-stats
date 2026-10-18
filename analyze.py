@@ -331,6 +331,26 @@ def write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, pr
     os.replace(tmp, os.path.join(adir, "accounts.json"))
 
 
+def relay_nips(relay):
+    """supported_nips from the relay's NIP-11 document (fetched at render time; [] if unreachable)."""
+    import urllib.request
+    url = os.environ.get("RELAY_NIP11_URL") or "https://" + relay + "/"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/nostr+json", "User-Agent": "relay-stats"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            nips = json.load(r).get("supported_nips") or []
+        return sorted({int(n) for n in nips if isinstance(n, int) or str(n).isdigit()})
+    except Exception:
+        return []
+
+
+def nips_html(nips):
+    if not nips:
+        return ""
+    links = " ".join('<a href="https://github.com/nostr-protocol/nips/blob/master/%02d.md" title="NIP-%02d">%02d</a>' % (n, n, n) for n in nips)
+    return '<div class="nips">NIPs ' + links + '</div>'
+
+
 def render(s, outdir):
     """Inject stats + history into template.html (editable without touching code)."""
     hist = []
@@ -353,6 +373,7 @@ def render(s, outdir):
         pass
     data = json.dumps({"stats": s, "history": hist, "traffic": traffic}, ensure_ascii=False).replace("<", "\\u003c")
     html = (tpl.replace("__RELAY_STATS_DATA__", data).replace("__RELAY_NAME__", s["relay"])
+               .replace("<!--SUPPORTED_NIPS-->", nips_html(relay_nips(s["relay"])))
                .replace("<!--SEARCH_FORM-->", SEARCH_FORM if (CONFIG.get("SEARCH_STRFRY") or CONFIG.get("SEARCH_NOSTRFY")) else "")
                .replace("__OG_VERSION__", str(s.get("date", "")).replace("-", "")))   # changes daily -> SNS caches refresh
     tmp = os.path.join(outdir, "index.html.tmp")

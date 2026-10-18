@@ -90,7 +90,6 @@ async function req(...filters) {
   const id = 'w' + (++subSeq);
   return new Promise(res => {
     const p = { events: [], res, t: setTimeout(() => { pending.delete(id); res(p.events); }, 8000) };
-    p.closed = null;
     pending.set(id, p);
     ws.send(JSON.stringify(['REQ', id, ...filters]));
   });
@@ -405,8 +404,8 @@ function searchRows(d, match, long, short, lo, hi, f) {
 }
 const hasIndex = (d, name) => cached('ix:' + name + dbIno, 600_000, () => !!d.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(name));   // search-index.py: rowid = created_at << 20 | id bits
 
-// NIP-50 mode: the relay does the search. Results come newest-stored first; paging uses `until` on created_at,
-// so a page may repeat an event that shares the boundary second (deduped by id on the client side of this code).
+// NIP-50 mode: the relay does the search (results newest first by created_at). Paging uses `until` on created_at;
+// events of the boundary second already shown are passed back as `seen` ids and skipped.
 const KIND_SETS = { note: [1], article: [30023], chat: [40, 41, 42], all: [1, 30023, 40, 41, 42] };
 const KIND_LABEL = { note: 'notes only', article: 'articles only', chat: 'chat only' };
 async function searchRowsNip50(q, f, cursor) {

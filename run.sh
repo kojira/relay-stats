@@ -25,11 +25,14 @@ if [ -n "$AUDIT" ] && [ -d "$AUDIT" ]; then
 fi
 nice -n 10 "$HERE/venv/bin/python" "$HERE/analyze.py" "$RELAY" "$TMP" "$HERE/www" ${BAN:+"$BAN"}
 # full-text search index for web/server.mjs (state/search/search.sqlite); opt-in with SEARCH_STRFRY in relay-stats.conf
-# (the strfry command line used to read events, e.g. "/path/strfry --config /path/strfry.conf"); never fatal
-SEARCH_STRFRY="${SEARCH_STRFRY:-$(sed -n 's/^SEARCH_STRFRY=//p' "${RELAY_STATS_CONF:-$HERE/relay-stats.conf}" 2>/dev/null | tail -1)}"
+# (the strfry command line used to read events, e.g. "/path/strfry --config /path/strfry.conf"), or for nostrfy with
+# SEARCH_NOSTRFY ("/path/nostrfy-scan /path/nostrfy-data"); never fatal
+CONF="${RELAY_STATS_CONF:-$HERE/relay-stats.conf}"
+SEARCH_STRFRY="${SEARCH_STRFRY:-$(sed -n 's/^SEARCH_STRFRY=//p' "$CONF" 2>/dev/null | tail -1)}"
+SEARCH_NOSTRFY="${SEARCH_NOSTRFY:-$(sed -n 's/^SEARCH_NOSTRFY=//p' "$CONF" 2>/dev/null | tail -1)}"
 # skipped while a full rebuild (state/search/build.sqlite) runs: it is renamed over search.sqlite when done
-if [ -n "$SEARCH_STRFRY" ] && [ -f "$HERE/state/search/search.sqlite" ] && [ ! -e "$HERE/state/search/build.sqlite" ]; then
-    SEARCH_STRFRY="$SEARCH_STRFRY" nice -n 10 "$HERE/venv/bin/python" "$HERE/search-index.py" "$HERE/state/search/search.sqlite" >&2 \
+if [ -n "$SEARCH_STRFRY$SEARCH_NOSTRFY" ] && [ -f "$HERE/state/search/search.sqlite" ] && [ ! -e "$HERE/state/search/build.sqlite" ]; then
+    SEARCH_STRFRY="$SEARCH_STRFRY" SEARCH_NOSTRFY="$SEARCH_NOSTRFY" nice -n 10 "$HERE/venv/bin/python" "$HERE/search-index.py" "$HERE/state/search/search.sqlite" >&2 \
         || echo "$(date '+%F %T') search index update failed" >&2
 fi
 # OG image (www/assets/og.png); failure must not break the stats update

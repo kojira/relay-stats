@@ -37,7 +37,7 @@ except Exception as e:  # python < 3.9 or unknown name: fail loudly instead of s
 # Day number d = (ts + TZ_OFFSET) // DAY, i.e. the date is 1970-01-01 + d days (same as relay-scan).
 TZ_OFFSET = int(datetime.datetime.now(TZ).utcoffset().total_seconds())
 TZ_LABEL = CONFIG["TIMEZONE"]
-# full-text search box (only where web/server.mjs serves /search: SEARCH_STRFRY set in relay-stats.conf)
+# full-text search box (only where web/server.mjs serves /search: SEARCH_STRFRY / SEARCH_NOSTRFY set in relay-stats.conf)
 SEARCH_FORM = ('<form class="sform" action="/search" method="get" role="search">'
                '<input name="q" placeholder="Search notes and articles" aria-label="search"><button>Search</button></form>')
 
@@ -353,7 +353,7 @@ def render(s, outdir):
         pass
     data = json.dumps({"stats": s, "history": hist, "traffic": traffic}, ensure_ascii=False).replace("<", "\\u003c")
     html = (tpl.replace("__RELAY_STATS_DATA__", data).replace("__RELAY_NAME__", s["relay"])
-               .replace("<!--SEARCH_FORM-->", SEARCH_FORM if CONFIG.get("SEARCH_STRFRY") else "")
+               .replace("<!--SEARCH_FORM-->", SEARCH_FORM if (CONFIG.get("SEARCH_STRFRY") or CONFIG.get("SEARCH_NOSTRFY")) else "")
                .replace("__OG_VERSION__", str(s.get("date", "")).replace("-", "")))   # changes daily -> SNS caches refresh
     tmp = os.path.join(outdir, "index.html.tmp")
     with open(tmp, "w", encoding="utf-8") as f:

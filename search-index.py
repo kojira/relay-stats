@@ -3,7 +3,8 @@
 
 usage: search-index.py <db-path> [--full]
        (reads events from `$SEARCH_STRFRY scan <filter>`, e.g.
-        SEARCH_STRFRY="/path/strfry --config /path/strfry.conf")
+        SEARCH_STRFRY="/path/strfry --config /path/strfry.conf";
+        for nostrfy: SEARCH_NOSTRFY="/path/nostrfy-scan /path/nostrfy-data", which reads the LMDB directly)
 
 --full   index every stored event (first build; tens of minutes on a large relay)
 default  incremental: events with created_at since the last run minus 2 days, plus kind 5 deletions
@@ -73,7 +74,11 @@ def open_db(path):
 
 
 def scan(flt):
-    cmd = shlex.split(os.environ["SEARCH_STRFRY"]) + ["scan", json.dumps(flt)]
+    if os.environ.get("SEARCH_NOSTRFY"):           # "<nostrfy-scan> <dbdir>": nostrfy LMDB, event JSON lines
+        cmd = shlex.split(os.environ["SEARCH_NOSTRFY"]) + [str(flt.get("since", 0)), "0", "json",
+                                                            ",".join(map(str, flt["kinds"]))]
+    else:
+        cmd = shlex.split(os.environ["SEARCH_STRFRY"]) + ["scan", json.dumps(flt)]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
     for line in p.stdout:
         try:
@@ -82,7 +87,7 @@ def scan(flt):
             continue
     p.wait()
     if p.returncode:
-        raise SystemExit(f"search-index: strfry scan failed ({p.returncode})")
+        raise SystemExit(f"search-index: scan failed ({p.returncode})")
 
 
 def put_note(db, e):

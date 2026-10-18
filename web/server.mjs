@@ -12,8 +12,8 @@
 // file when it changes), deleted events, and events / profiles flagged NSFW (content-warning tag,
 // "nsfw" t / l tag, #nsfw in the text).
 //
-// env: WEB_PORT (7780), WEB_RELAY_WS (ws://127.0.0.1:7777), WEB_BASE (https://r.kojira.io),
-//      WEB_SEARCH_DB (../state/search/search.sqlite), WEB_BANLIST, WEB_RELAY_NAME (r.kojira.io)
+// env: WEB_PORT (7780), WEB_RELAY_WS (ws://127.0.0.1:7777), WEB_BASE (required, e.g. https://relay.example.com),
+//      WEB_SEARCH_DB (../state/search/search.sqlite), WEB_BANLIST (hex pubkeys, one per line), WEB_RELAY_NAME (host of WEB_BASE)
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -26,7 +26,8 @@ import { marked } from 'marked';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = +(process.env.WEB_PORT || 7780);
 const RELAY_WS = process.env.WEB_RELAY_WS || 'ws://127.0.0.1:7777';
-const BASE = (process.env.WEB_BASE || 'https://r.kojira.io').replace(/\/$/, '');
+if (!process.env.WEB_BASE) { console.error('WEB_BASE is required (public URL of the relay, e.g. https://relay.example.com)'); process.exit(1); }
+const BASE = process.env.WEB_BASE.replace(/\/$/, '');
 const RELAY_NAME = process.env.WEB_RELAY_NAME || new URL(BASE).host;
 const SEARCH_DB = process.env.WEB_SEARCH_DB || path.join(HERE, '..', 'state', 'search', 'search.sqlite');
 const BANLIST = process.env.WEB_BANLIST || '';

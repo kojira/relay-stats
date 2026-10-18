@@ -16,3 +16,4 @@ state/
 web/node_modules/
 web/*.log
 state/search/queries.log
+relay-stats.conf

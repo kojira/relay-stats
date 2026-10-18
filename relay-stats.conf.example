@@ -3,4 +3,6 @@
 TIMEZONE=Asia/Tokyo
 # Directory of the strfry-ratelimit audit trail (audit-YYYYMMDD.tsv[.gz]). When set, an "Ephemeral events"
 # panel (hourly / daily / monthly events and distinct sources) is added. Leave unset to hide it.
-AUDIT_DIR=~/strfry-audit
+# AUDIT_DIR=/path/to/strfry-audit
+# strfry command line used by search-index.py to read events (web/server.mjs search). Leave unset to disable.
+# SEARCH_STRFRY=/path/to/strfry --config /path/to/strfry.conf

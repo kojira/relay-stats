@@ -1,0 +1,2 @@
+# short words (1-2 characters) that always get their own search index; one per line
+猫

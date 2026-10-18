@@ -6,3 +6,5 @@ TIMEZONE=Asia/Tokyo
 # AUDIT_DIR=/path/to/strfry-audit
 # strfry command line used by search-index.py to read events (web/server.mjs search). Leave unset to disable.
 # SEARCH_STRFRY=/path/to/strfry --config /path/to/strfry.conf
+# for a nostrfy relay instead: nostrfy-scan and the nostrfy data directory
+# SEARCH_NOSTRFY=/path/to/nostrfy-scan /path/to/nostrfy-data

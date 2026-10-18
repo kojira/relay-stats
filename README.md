@@ -21,6 +21,7 @@ strfry 側は `relay.landingPageFile = "<このディレクトリ>/www/index.htm
 ## nostrfy
 nostrfy の LMDB は `src/nostrfy-scan.c` で読む（出力は relay-scan と同じ TSV）。nostrfy と同じ LMDB（lmdb-master-sys, `MDB_IDL_LOGN=16`）でビルドすること。
 `RELAY_STATS_SCANNER=nostrfy-scan` で run.sh / backfill-run.sh が relay-scan の代わりに使う。
+`nostrfy-scan <db> <since> 0 json <kind,...>` は保存されているイベントの JSON を1行ずつ出す（全文検索の索引づくりに使う）。
 
 ## 設定（relay-stats.conf）
 `relay-stats.conf.example` を `relay-stats.conf` にコピーして書き換える（`relay-stats.conf` は git 管理外）。
@@ -87,7 +88,7 @@ njump.me と同じ形の URL で、投稿・記事・プロフィールのペー
 - 準備:
   ```sh
   (cd web && npm install)
-  # relay-stats.conf
+  # relay-stats.conf（nostrfy なら SEARCH_NOSTRFY=/path/to/nostrfy-scan /path/to/nostrfy-data）
   SEARCH_STRFRY=/path/to/strfry --config /path/to/strfry.conf
   # 初回の全件索引。以後は run.sh が毎時、追加分と削除を反映する
   SEARCH_STRFRY="..." ./venv/bin/python search-index.py state/search/build.sqlite --full && mv state/search/build.sqlite state/search/search.sqlite

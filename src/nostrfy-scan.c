@@ -6,6 +6,8 @@
 //   B <pubkeyhex>                         (Fediverse bridge account)
 //   D <pubkeyhex> <day>                   (full mode: first activity per pubkey-day)
 //   S <key> <value>
+// usage: nostrfy-scan <dbdir> <since_unix> [until_unix|0] [full]
+//        nostrfy-scan <dbdir> <since_unix> <until_unix|0> json <kind,kind,...>   (event JSON lines; search-index.py)
 //
 // nostrfy (heed/LMDB) tables used (src/db/store.rs, v0.1.15):
 //   events      id(32)                         -> event JSON (serde_json, field order id,pubkey,created_at,kind,tags,content,sig)
@@ -20,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 static uint64_t be64(const unsigned char *p) {
     uint64_t v = 0;
@@ -106,12 +109,54 @@ static int first_ptag(const char *s, size_t n, char *out) {
 
 #define CHK(x) do { int rc_ = (x); if (rc_) { fprintf(stderr, "%s: %s\n", #x, mdb_strerror(rc_)); return 1; } } while (0)
 
+// json mode (search-index.py): print the stored event JSON, one per line, of the given kinds with
+// since <= created_at < until, via the by_kind index. Expired events (NIP-40) are skipped.
+static int json_dump(const char *dir, uint64_t since, uint64_t until, const char *kinds) {
+    MDB_env *env; MDB_txn *txn; MDB_dbi dEv, dMeta, dKind;
+    CHK(mdb_env_create(&env));
+    CHK(mdb_env_set_maxdbs(env, 64));
+    CHK(mdb_env_set_maxreaders(env, 1025));
+    CHK(mdb_env_open(env, dir, MDB_RDONLY | MDB_NOTLS, 0644));
+    { int dead = 0; mdb_reader_check(env, &dead); if (dead) fprintf(stderr, "cleared %d stale LMDB reader(s)\n", dead); }
+    CHK(mdb_txn_begin(env, NULL, MDB_RDONLY, &txn));
+    CHK(mdb_dbi_open(txn, "events", 0, &dEv));
+    CHK(mdb_dbi_open(txn, "event_meta", 0, &dMeta));
+    CHK(mdb_dbi_open(txn, "by_kind", 0, &dKind));
+    uint64_t now = (uint64_t)time(NULL);
+    MDB_cursor *c; CHK(mdb_cursor_open(txn, dKind, &c));
+    for (const char *p = kinds; *p; ) {
+        char *endp; uint64_t kind = strtoull(p, &endp, 10);
+        if (endp == p) { fprintf(stderr, "bad kind list\n"); return 2; }
+        p = *endp == ',' ? endp + 1 : endp;
+        unsigned char sk[16];
+        for (int i = 0; i < 8; i++) { sk[i] = (unsigned char)(kind >> (56 - 8*i)); sk[8+i] = (unsigned char)(since >> (56 - 8*i)); }
+        MDB_val k = { 16, sk }, v;
+        for (int rc = mdb_cursor_get(c, &k, &v, MDB_SET_RANGE); rc == 0; rc = mdb_cursor_get(c, &k, &v, MDB_NEXT)) {
+            if (k.mv_size != 48) continue;
+            const unsigned char *kb = k.mv_data;
+            if (be64(kb) != kind || be64(kb + 8) >= until) break;
+            MDB_val idk = { 32, (void*)(kb + 16) }, mv, ev;
+            if (!mdb_get(txn, dMeta, &idk, &mv) && mv.mv_size >= 56) {
+                uint64_t exp = be64((const unsigned char*)mv.mv_data + 48);
+                if (exp && exp <= now) continue;
+            }
+            if (mdb_get(txn, dEv, &idk, &ev)) continue;
+            fwrite(ev.mv_data, 1, ev.mv_size, stdout); putchar('\n');
+        }
+    }
+    mdb_cursor_close(c);
+    mdb_txn_abort(txn);
+    mdb_env_close(env);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: nostrfy-scan <dbdir> <since_unix> [until_unix] [full]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: nostrfy-scan <dbdir> <since_unix> [until_unix|0] [full | json <kinds>]\n"); return 2; }
     uint64_t since = strtoull(argv[2], 0, 10);
     uint64_t until = argc > 3 ? strtoull(argv[3], 0, 10) : UINT64_MAX;
     if (until == 0) until = UINT64_MAX;
     int full = argc > 4 && !strcmp(argv[4], "full");
+    if (argc > 5 && !strcmp(argv[4], "json")) return json_dump(argv[1], since, until, argv[5]);
     int64_t tzoff = 32400;
     { const char *e = getenv("RELAY_STATS_TZ_OFFSET"); char *endp;
       if (e) { tzoff = strtoll(e, &endp, 10); if (!*e || *endp || tzoff < -50400 || tzoff > 50400) { fprintf(stderr, "bad RELAY_STATS_TZ_OFFSET\n"); return 2; } } }

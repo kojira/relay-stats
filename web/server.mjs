@@ -4,7 +4,7 @@
 //   /npub1…            profile + latest notes          /npub/<hex>  -> 301 /npub1…
 //   /note1…            one note (kind 1) or article    /event/<hex> -> 301 /note1…
 //   /search/<words>    full-text search (noindex,follow)  /search?q= -> 301 /search/<q>
-//   /search-authors?q= author suggestions for the search filter (JSON: name / display_name match)
+//   /search?suggest=…  author suggestions for the search filter (JSON: name / display_name match)
 //   /robots.txt, /sitemap.xml, /sitemap-<n>.xml
 // Everything else is 404 (nprofile / nevent / naddr included).
 //
@@ -425,7 +425,7 @@ const close=()=>{ul.hidden=true;ul.innerHTML='';items=[];on=-1};
 const mark=i=>{on=i;[...ul.children].forEach((li,j)=>li.classList.toggle('on',j===i));};
 const pick=i=>{const x=items[i];if(!x)return;inp.value=x.npub;let n=box.parentNode.querySelector('.aname');if(!n){n=document.createElement('span');n.className='aname';box.before(n)}n.textContent=x.name;close()};
 inp.addEventListener('input',()=>{clearTimeout(t);const v=inp.value.trim();const n=box.parentNode.querySelector('.aname');if(n)n.remove();
-if(!v||isKey(v)){close();return}t=setTimeout(async()=>{const my=++seq;try{const r=await(await fetch('/search-authors?q='+encodeURIComponent(v))).json();
+if(!v||isKey(v)){close();return}t=setTimeout(async()=>{const my=++seq;try{const r=await(await fetch('/search?suggest='+encodeURIComponent(v))).json();
 if(my!==seq)return;items=r.people||[];ul.innerHTML='';if(!items.length){close();return}
 for(const[i,x]of items.entries()){const li=document.createElement('li'),im=document.createElement('img'),d=document.createElement('div'),s=document.createElement('span'),sm=document.createElement('small');
 if(x.picture)im.src=x.picture;im.loading='lazy';im.alt='';s.textContent=x.name;sm.textContent=[x.sub&&x.sub!==x.name?'@'+x.sub:'',x.nip05,x.npub.slice(0,16)+'…'].filter(Boolean).join(' · ');
@@ -699,14 +699,14 @@ async function route(u, ip) {
   }
   if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemap(null));
   if ((m = p.match(/^\/sitemap-(\d+|profiles)\.xml$/))) return cached('sm' + m[1], 3600_000, () => sitemap(m[1] === 'profiles' ? 'profiles' : +m[1]));
+  if (p === '/search' && u.searchParams.has('suggest')) {
+    const r = await suggestAuthors(u.searchParams.get('suggest') || '');
+    return [200, JSON.stringify(r), 'application/json; charset=utf-8'];
+  }
   if (p === '/search' || p === '/search/') {
     const q = (u.searchParams.get('q') || '').trim();
     const rest = new URLSearchParams([...u.searchParams].filter(([k, v]) => k !== 'q' && v !== ''));
     return q ? [301, '', '', `/search/${encodeURIComponent(q)}${rest.size ? '?' + rest : ''}`] : notFound('Empty query');
-  }
-  if (p === '/search-authors') {
-    const r = await suggestAuthors(u.searchParams.get('q') || '');
-    return [200, JSON.stringify(r), 'application/json; charset=utf-8'];
   }
   if ((m = p.match(/^\/search\/(.+)$/))) { const sp = u.searchParams; sp.ip = ip; return searchPage(m[1], sp); }
   if ((m = p.match(/^\/npub\/([0-9a-f]{64})$/))) return [301, '', '', '/' + npubOf(m[1])];
@@ -727,7 +727,8 @@ http.createServer(async (rq, rs) => {
   let u;
   try { u = new URL(rq.url, BASE); } catch { rs.writeHead(400).end(); return; }
   if (rq.method !== 'GET' && rq.method !== 'HEAD') { rs.writeHead(405).end(); return; }
-  if (limited(ip, u.pathname === '/search-authors' ? 1 : u.pathname.startsWith('/search') ? 4 : 1)) {
+  const suggest = u.pathname === '/search' && u.searchParams.has('suggest');
+  if (limited(ip, suggest ? 1 : u.pathname.startsWith('/search') ? 4 : 1)) {
     rs.writeHead(429, { 'content-type': 'text/plain', 'retry-after': '60' }).end('Too many requests'); return;
   }
   let out;
@@ -736,6 +737,6 @@ http.createServer(async (rq, rs) => {
   const h = { 'content-type': type, 'x-content-type-options': 'nosniff' };
   if (loc) h.location = loc;
   if (status === 200) h['cache-control'] = u.pathname.startsWith('/search') ? 'public, max-age=60' : 'public, max-age=300';
-  if (u.pathname === '/search-authors') h['x-robots-tag'] = 'noindex';
+  if (suggest) h['x-robots-tag'] = 'noindex';
   rs.writeHead(status, h).end(rq.method === 'HEAD' ? undefined : body);
 }).listen(PORT, '127.0.0.1', () => console.log(`relay-stats web on 127.0.0.1:${PORT} -> ${RELAY_WS}, search ${SEARCH_MODE === 'nip50' ? 'NIP-50 via relay' : 'index ' + SEARCH_DB}`));

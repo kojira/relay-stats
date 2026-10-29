@@ -381,9 +381,20 @@ async function suggestAuthors(q, ms = SUGGEST_MS) {
       if (evs === null) { cache.delete('as:' + q); return { people: [], timeout: true }; }
       if (evs.closed) evs = [];
     } else {
-      const d = sdb(), words = q.split(/\s+/).filter(w => [...w].length >= 3);
-      const pks = d && words.length ? d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
-          WHERE profiles_fts MATCH ? LIMIT 40`).all(words.map(w => '"' + w.replace(/"/g, '""') + '"').join(' ')).map(r => r.pk) : [];
+      // trigram FTS needs 3+ characters per word; shorter words are matched with LIKE on the names
+      // (a table scan, fine for the profile counts this mode is used with)
+      const d = sdb(), words = q.split(/\s+/).filter(Boolean), long = words.filter(w => [...w].length >= 3), short = words.filter(w => [...w].length < 3);
+      let pks = [];
+      if (d && long.length) {
+        const cond = short.map(() => "(p.name LIKE ? ESCAPE '\\' OR p.display_name LIKE ? ESCAPE '\\')");
+        pks = d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
+          WHERE profiles_fts MATCH ?${cond.length ? ' AND ' + cond.join(' AND ') : ''} LIMIT 40`)
+          .all(long.map(w => '"' + w.replace(/"/g, '""') + '"').join(' '), ...short.flatMap(w => [likeArg(w), likeArg(w)])).map(r => r.pk);
+      } else if (d && short.length) {
+        const cond = short.map(() => "(name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')");
+        pks = d.prepare(`SELECT lower(hex(pubkey)) pk FROM profiles WHERE ${cond.join(' AND ')} ORDER BY created_at DESC LIMIT 40`)
+          .all(...short.flatMap(w => [likeArg(w), likeArg(w)])).map(r => r.pk);
+      }
       evs = pks.length ? await req({ kinds: [0], authors: pks }) : [];
     }
     const ban = bans(), best = {};

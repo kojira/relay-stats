@@ -4,6 +4,7 @@
 //   /npub1…            profile + latest notes          /npub/<hex>  -> 301 /npub1…
 //   /note1…            one note (kind 1) or article    /event/<hex> -> 301 /note1…
 //   /search/<words>    full-text search (noindex,follow)  /search?q= -> 301 /search/<q>
+//   /search?suggest=…  author suggestions for the search filter (JSON: name / display_name match)
 //   /robots.txt, /sitemap.xml, /sitemap-<n>.xml
 // Everything else is 404 (nprofile / nevent / naddr included).
 //
@@ -210,6 +211,11 @@ h1.t{font-size:24px;line-height:1.4;margin:.2em 0 .4em}.article img{max-width:10
 .filters input,.filters select{background:var(--bg);border:1px solid var(--line);color:var(--fg);padding:6px 8px;border-radius:6px;font:inherit;font-size:14px;color-scheme:dark}
 .filters button{background:var(--acc);color:#001;border:0;border-radius:6px;padding:7px 16px;font-weight:700;cursor:pointer}
 .presets{display:flex;gap:10px;font-size:13px;width:100%}
+.asug{position:relative;display:block}.asug input{width:100%}.aname{color:var(--fg)}
+.asug ul{position:absolute;z-index:5;left:0;right:0;top:100%;margin:2px 0 0;padding:4px 0;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;max-height:340px;overflow:auto}
+.asug li{display:flex;gap:8px;align-items:center;padding:5px 10px;cursor:pointer;font-size:14px;color:var(--fg)}.asug li.on,.asug li:hover{background:#ffffff12}
+.asug li img{width:26px;height:26px;border-radius:50%;object-fit:cover;background:#123;flex:none}.asug li small{color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.asug li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 mark{background:#ff4fd833;color:inherit;border-radius:3px}footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
 `;
 function page({ title, desc = '', canonical = '', robots = 'index,follow', og = {}, body, q = '', jsonld = null, status = 200 }) {
@@ -319,7 +325,8 @@ function parseFilters(sp) {
   else if (a.startsWith('npub1') || a.startsWith('nprofile1')) { try { const d = nip19.decode(a); f.author = d.type === 'npub' ? d.data : d.data.pubkey; } catch {} }
   else if (a.startsWith('nostr:')) { try { const d = nip19.decode(a.slice(6)); f.author = d.type === 'npub' ? d.data : d.data.pubkey; } catch {} }
   if (sp.get('kind') === 'note' || sp.get('kind') === 'article' || (sp.get('kind') === 'chat' && SEARCH_MODE === 'nip50')) f.kind = sp.get('kind');
-  f.badAuthor = !!a && !f.author;
+  f.authorName = a && !f.author && !/^(npub1|nprofile1|nostr:|[0-9a-f]{20,})/i.test(a) ? a.slice(0, 60) : '';
+  f.badAuthor = !!a && !f.author && !f.authorName;
   return f;
 }
 const ymd = t => new Date((t + JST) * 1000).toISOString().slice(0, 10);
@@ -340,12 +347,104 @@ function filterForm(q, f) {
 <label>From <input type="date" name="since" value="${f.since ? ymd(f.since) : ''}"></label>
 <label>To <input type="date" name="until" value="${f.until ? ymd(f.until) : ''}"></label>
 <label>Type <select name="kind">${sel('', 'All')}${sel('note', 'Notes (kind 1)')}${sel('article', 'Articles (kind 30023)')}${SEARCH_MODE === 'nip50' ? sel('chat', 'Chat (kind 40/41/42)') : ''}</select></label>
-<label class="wide">Author <input name="author" value="${f.author ? npubOf(f.author) : ''}" placeholder="npub1…"></label>
+<label class="wide">Author${f.authorLabel ? ` <span class="aname">${esc(f.authorLabel)}</span>` : ''}<span class="asug"><input name="author" value="${f.author ? npubOf(f.author) : esc(f.authorName || '')}" placeholder="name or npub1…" autocomplete="off" spellcheck="false"><ul hidden></ul></span></label>
 <div class="presets">${[['24h', 1], ['7 days', 7], ['30 days', 30], ['1 year', 365]].map(([l, d]) =>
   `<a href="/search/${encodeURIComponent(q)}${filterQuery({ ...f, since: Math.floor(Date.now() / 1000) - d * 86400, until: 0 })}" rel="nofollow">${l}</a>`).join('')}
 ${open ? `<a href="/search/${encodeURIComponent(q)}" rel="nofollow">clear</a>` : ''}</div>
-<button>Apply</button></form></details>`;
+<button>Apply</button></form></details>${AUTHOR_JS}`;
 }
+// ---- author suggestions: people whose name / display_name contains the typed text ----
+// Ranked: whole name equal, then name starts with it, then contains it; ties by notes in the last 30 days.
+// Banned / NSFW / about-only matches are left out. NIP-50 mode asks the relay (kind 0 search) with a time
+// limit; SQLite mode uses profiles_fts (3+ characters).
+const SUGGEST_MS = 1500, SUGGEST_MAX = 8;
+const fold = s => String(s || '').normalize('NFKC').toLowerCase();
+const suggestMin = q => /^[\x00-\x7f]*$/.test(q) ? 3 : 2;
+const withTimeout = (p, ms) => Promise.race([p, new Promise(res => setTimeout(() => res(null), ms))]);
+function rankProfile(q, p) {
+  const words = fold(q).split(/\s+/).filter(Boolean);
+  let best = 9;
+  for (const n of [p.display_name, p.displayName, p.name].map(fold).filter(Boolean)) {
+    if (!words.every(w => n.includes(w))) continue;
+    const r = n === words.join(' ') ? 0 : n.startsWith(words[0]) ? 1 : 2;
+    if (r < best) best = r;
+  }
+  return best;
+}
+async function suggestAuthors(q, ms = SUGGEST_MS) {
+  q = q.trim().slice(0, 60);
+  if ([...q.replace(/\s+/g, '')].length < suggestMin(q.replace(/\s+/g, ''))) return { people: [], short: true };
+  return cached('as:' + q, 300_000, async () => {
+    let evs;
+    if (SEARCH_MODE === 'nip50') {
+      evs = await withTimeout(req({ search: q, kinds: [0], limit: 40 }), ms);
+      if (evs === null) { cache.delete('as:' + q); return { people: [], timeout: true }; }
+      if (evs.closed) evs = [];
+    } else {
+      // trigram FTS needs 3+ characters per word; shorter words are matched with LIKE on the names
+      // (a table scan, fine for the profile counts this mode is used with)
+      const d = sdb(), words = q.split(/\s+/).filter(Boolean), long = words.filter(w => [...w].length >= 3), short = words.filter(w => [...w].length < 3);
+      let pks = [];
+      if (d && long.length) {
+        const cond = short.map(() => "(p.name LIKE ? ESCAPE '\\' OR p.display_name LIKE ? ESCAPE '\\')");
+        pks = d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
+          WHERE profiles_fts MATCH ?${cond.length ? ' AND ' + cond.join(' AND ') : ''} LIMIT 40`)
+          .all(long.map(w => '"' + w.replace(/"/g, '""') + '"').join(' '), ...short.flatMap(w => [likeArg(w), likeArg(w)])).map(r => r.pk);
+      } else if (d && short.length) {
+        const cond = short.map(() => "(name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')");
+        pks = d.prepare(`SELECT lower(hex(pubkey)) pk FROM profiles WHERE ${cond.join(' AND ')} ORDER BY created_at DESC LIMIT 40`)
+          .all(...short.flatMap(w => [likeArg(w), likeArg(w)])).map(r => r.pk);
+      }
+      evs = pks.length ? await req({ kinds: [0], authors: pks }) : [];
+    }
+    const ban = bans(), best = {};
+    for (const e of evs) if (!best[e.pubkey] || best[e.pubkey].created_at < e.created_at) best[e.pubkey] = e;
+    let cands = [];
+    for (const e of Object.values(best)) {
+      if (ban.has(e.pubkey) || nsfw(e) || !verifyEvent(e)) continue;
+      let p; try { p = JSON.parse(e.content); } catch { continue; }
+      if (!p || typeof p !== 'object') continue;
+      if (/🔞|\bnsfw\b|\br-?18\b/i.test([p.name, p.display_name, p.displayName, p.about].join(' '))) continue;   // adult markers in the profile itself
+      const rank = rankProfile(q, p);
+      if (rank < 9) cands.push({ pk: e.pubkey, p, rank });
+    }
+    cands.sort((a, b) => a.rank - b.rank);
+    cands = cands.slice(0, SUGGEST_MAX * 2);
+    const act = {};
+    if (cands.length > 1) {
+      const recent = await withTimeout(req({ kinds: [1], authors: cands.map(c => c.pk), since: Math.floor(Date.now() / 1000) - 30 * 86400, limit: 2000 }), 1500) || [];
+      for (const e of recent) act[e.pubkey] = (act[e.pubkey] || 0) + 1;
+    }
+    cands.sort((a, b) => a.rank - b.rank || (act[b.pk] || 0) - (act[a.pk] || 0));
+    return { people: cands.slice(0, SUGGEST_MAX).map(c => ({
+      npub: npubOf(c.pk), name: nameOf(c.pk, c.p), sub: String(c.p.name || '').slice(0, 60),
+      nip05: String(c.p.nip05 || '').slice(0, 80), picture: safeUrl(String(c.p.picture || '')) })) };
+  });
+}
+// no-JS fallback: a name typed into Author shows the matching people as links that set the filter
+async function authorChoices(q, f) {
+  const r = await suggestAuthors(f.authorName, 4000);
+  const items = r.people.map(x => `<a class="who" href="/search/${encodeURIComponent(q)}${filterQuery({ ...f, author: nip19.decode(x.npub).data })}" rel="nofollow">
+${x.picture ? `<img src="${esc(x.picture)}" alt="" loading="lazy">` : '<img alt="">'}<div><span class="n">${esc(x.name)}</span><div class="s">${x.nip05 ? esc(x.nip05) + ' · ' : ''}${esc(x.npub.slice(0, 20))}…</div></div></a>`).join('');
+  return items ? `<div class="card"><div class="hint" style="margin-bottom:6px">Pick the author “${esc(f.authorName)}”</div>${items}</div>`
+    : `<div class="card"><p class="hint">${r.short ? 'Type at least ' + suggestMin(f.authorName) + ' characters of the name, or paste an npub1….' : r.timeout ? 'Name lookup took too long; try a longer part of the name, or paste an npub1….' : 'No one named “' + esc(f.authorName) + '” on this relay.'}</p></div>`;
+}
+const AUTHOR_JS = `<script>(()=>{const box=document.currentScript.previousElementSibling.querySelector('.asug');if(!box)return;
+const inp=box.querySelector('input'),ul=box.querySelector('ul');let t=0,seq=0,items=[],on=-1;
+const isKey=v=>/^(npub1|nprofile1|nostr:|[0-9a-f]{20,})/i.test(v);
+const close=()=>{ul.hidden=true;ul.innerHTML='';items=[];on=-1};
+const mark=i=>{on=i;[...ul.children].forEach((li,j)=>li.classList.toggle('on',j===i));};
+const pick=i=>{const x=items[i];if(!x)return;inp.value=x.npub;let n=box.parentNode.querySelector('.aname');if(!n){n=document.createElement('span');n.className='aname';box.before(n)}n.textContent=x.name;close()};
+inp.addEventListener('input',()=>{clearTimeout(t);const v=inp.value.trim();const n=box.parentNode.querySelector('.aname');if(n)n.remove();
+if(!v||isKey(v)){close();return}t=setTimeout(async()=>{const my=++seq;try{const r=await(await fetch('/search?suggest='+encodeURIComponent(v))).json();
+if(my!==seq)return;items=r.people||[];ul.innerHTML='';if(!items.length){close();return}
+for(const[i,x]of items.entries()){const li=document.createElement('li'),im=document.createElement('img'),d=document.createElement('div'),s=document.createElement('span'),sm=document.createElement('small');
+if(x.picture)im.src=x.picture;im.loading='lazy';im.alt='';s.textContent=x.name;sm.textContent=[x.sub&&x.sub!==x.name?'@'+x.sub:'',x.nip05,x.npub.slice(0,16)+'…'].filter(Boolean).join(' · ');
+d.style.minWidth='0';d.style.display='grid';d.append(s,sm);li.append(im,d);li.addEventListener('mousedown',e=>{e.preventDefault();pick(i)});ul.append(li)}
+ul.hidden=false;mark(-1)}catch{}},250)});
+inp.addEventListener('keydown',e=>{if(ul.hidden)return;if(e.key==='ArrowDown'){e.preventDefault();mark(Math.min(on+1,items.length-1))}
+else if(e.key==='ArrowUp'){e.preventDefault();mark(Math.max(on-1,0))}else if(e.key==='Enter'&&on>=0){e.preventDefault();pick(on)}else if(e.key==='Escape')close()});
+inp.addEventListener('blur',()=>setTimeout(close,150));})()</script>`;
 const ROWID_SHIFT = 2 ** 20;
 const likeArg = w => '%' + w.replace(/[\\%_]/g, c => '\\' + c) + '%';
 // Query planning. The FTS walk (newest first) is fast when matches are dense, but with a narrow filter
@@ -424,7 +523,9 @@ async function searchPageNip50(q, sp) {
   const head = `<p class="hint">Results for <b>${esc(q)}</b>`;
   const title = `"${q}" · search · ${RELAY_NAME}`;
   const fail = msg => page({ title, robots: 'noindex,follow', q, status: 404, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
-  if (f.badAuthor) return fail('Author must be an npub1… / nprofile1… or a 64-character hex pubkey.');
+  if (f.badAuthor) return fail('Author must be a name, an npub1… / nprofile1… or a 64-character hex pubkey.');
+  if (f.authorName) return page({ title, robots: 'noindex,follow', q, body: filterForm(q, f) + await authorChoices(q, f) });
+  if (f.author) f.authorLabel = nameOf(f.author, (await profileOf(f.author)).p);
   if (f.since && f.until && f.since > f.until) return fail('"From" is after "To".');
   const t0 = Date.now();
   let evs, profEvs = [];
@@ -476,7 +577,9 @@ async function searchPage(q, sp) {
   const head = `<p class="hint">Results for <b>${esc(q)}</b>`;
   const title = `"${q}" · search · ${RELAY_NAME}`;
   const fail = msg => page({ title, robots: 'noindex,follow', q, status: 404, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
-  if (f.badAuthor) return fail('Author must be an npub1… / nprofile1… or a 64-character hex pubkey.');
+  if (f.badAuthor) return fail('Author must be a name, an npub1… / nprofile1… or a 64-character hex pubkey.');
+  if (f.authorName) return page({ title, robots: 'noindex,follow', q, body: filterForm(q, f) + await authorChoices(q, f) });
+  if (f.author) f.authorLabel = nameOf(f.author, (await profileOf(f.author)).p);
   if (f.since && f.until && f.since > f.until) return fail('"From" is after "To".');
   const { long, short } = ftsQuery(q);
   const shortBuilt = builtShort(d);
@@ -607,6 +710,10 @@ async function route(u, ip) {
   }
   if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemap(null));
   if ((m = p.match(/^\/sitemap-(\d+|profiles)\.xml$/))) return cached('sm' + m[1], 3600_000, () => sitemap(m[1] === 'profiles' ? 'profiles' : +m[1]));
+  if (p === '/search' && u.searchParams.has('suggest')) {
+    const r = await suggestAuthors(u.searchParams.get('suggest') || '');
+    return [200, JSON.stringify(r), 'application/json; charset=utf-8'];
+  }
   if (p === '/search' || p === '/search/') {
     const q = (u.searchParams.get('q') || '').trim();
     const rest = new URLSearchParams([...u.searchParams].filter(([k, v]) => k !== 'q' && v !== ''));
@@ -631,7 +738,8 @@ http.createServer(async (rq, rs) => {
   let u;
   try { u = new URL(rq.url, BASE); } catch { rs.writeHead(400).end(); return; }
   if (rq.method !== 'GET' && rq.method !== 'HEAD') { rs.writeHead(405).end(); return; }
-  if (limited(ip, u.pathname.startsWith('/search') ? 4 : 1)) {
+  const suggest = u.pathname === '/search' && u.searchParams.has('suggest');
+  if (limited(ip, suggest ? 1 : u.pathname.startsWith('/search') ? 4 : 1)) {
     rs.writeHead(429, { 'content-type': 'text/plain', 'retry-after': '60' }).end('Too many requests'); return;
   }
   let out;
@@ -640,5 +748,6 @@ http.createServer(async (rq, rs) => {
   const h = { 'content-type': type, 'x-content-type-options': 'nosniff' };
   if (loc) h.location = loc;
   if (status === 200) h['cache-control'] = u.pathname.startsWith('/search') ? 'public, max-age=60' : 'public, max-age=300';
+  if (suggest) h['x-robots-tag'] = 'noindex';
   rs.writeHead(status, h).end(rq.method === 'HEAD' ? undefined : body);
 }).listen(PORT, '127.0.0.1', () => console.log(`relay-stats web on 127.0.0.1:${PORT} -> ${RELAY_WS}, search ${SEARCH_MODE === 'nip50' ? 'NIP-50 via relay' : 'index ' + SEARCH_DB}`));

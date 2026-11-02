@@ -5,6 +5,7 @@
 //   /note1…            one note (kind 1) or article    /event/<hex> -> 301 /note1…
 //   /search/<words>    full-text search (noindex,follow)  /search?q= -> 301 /search/<q>
 //   /search?suggest=…  author suggestions for the search filter (JSON: name / display_name match)
+//   /timeline          live timeline of kind 1, read by the browser straight from the relay (timeline-client.js)
 //   /robots.txt, /sitemap.xml, /sitemap-<n>.xml
 // Everything else is 404 (nprofile / nevent / naddr included).
 //
@@ -15,12 +16,14 @@
 // "nsfw" t / l tag, #nsfw in the text).
 //
 // env: WEB_PORT (7780), WEB_RELAY_WS (ws://127.0.0.1:7777), WEB_BASE (required, e.g. https://relay.example.com),
+//      WEB_PUBLIC_WS (relay URL for browsers; default: WEB_BASE with wss://),
 //      WEB_SEARCH (sqlite | nip50), WEB_SEARCH_DB (../state/search/search.sqlite), WEB_BANLIST (hex pubkeys, one per line), WEB_RELAY_NAME (host of WEB_BASE)
 
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { nip19, verifyEvent } from 'nostr-tools';
 import { marked } from 'marked';
@@ -34,6 +37,7 @@ const RELAY_NAME = process.env.WEB_RELAY_NAME || new URL(BASE).host;
 const SEARCH_MODE = process.env.WEB_SEARCH === 'nip50' ? 'nip50' : 'sqlite';
 const SEARCH_DB = process.env.WEB_SEARCH_DB || path.join(HERE, '..', 'state', 'search', 'search.sqlite');
 const BANLIST = process.env.WEB_BANLIST || '';
+const PUBLIC_WS = process.env.WEB_PUBLIC_WS || BASE.replace(/^http/, 'ws');
 const PAGE = 30, SITEMAP_PAGE = 45000;
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -216,6 +220,17 @@ h1.t{font-size:24px;line-height:1.4;margin:.2em 0 .4em}.article img{max-width:10
 .asug li{display:flex;gap:8px;align-items:center;padding:5px 10px;cursor:pointer;font-size:14px;color:var(--fg)}.asug li.on,.asug li:hover{background:#ffffff12}
 .asug li img{width:26px;height:26px;border-radius:50%;object-fit:cover;background:#123;flex:none}.asug li small{color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .asug li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+html{overflow-x:hidden}@supports(overflow-x:clip){html,body{overflow-x:clip}}
+#tl{position:relative;overflow-x:clip}.tl-item .card{min-width:0;overflow:hidden}.tl-item .who>div{min-width:0}.tl-item .who .n{overflow-wrap:anywhere}.tl-item .body a{overflow-wrap:anywhere;word-break:break-all}.tl-item .meta{flex-wrap:wrap}.tl-item{position:absolute;left:0;right:0;top:0;padding-bottom:12px}.tl-item .card{margin:0}
+.tl-bar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 12px;color:var(--dim);font-size:13px}.tl-bar h1{margin:0;font-size:18px;color:var(--fg)}
+.tl-bar label{display:flex;gap:6px;align-items:center;cursor:pointer}#tl-status{margin-left:auto}
+.tl-more{margin-left:auto;background:none;border:0;color:var(--dim);font-size:20px;line-height:1;padding:2px 8px;border-radius:6px;cursor:pointer}.tl-more:hover{background:#ffffff12;color:var(--fg)}
+#tl-menu{position:absolute;z-index:10;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 0;min-width:180px;box-shadow:0 6px 24px #0008}
+#tl-menu button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--fg);padding:7px 14px;font:inherit;font-size:14px;cursor:pointer}#tl-menu button:hover{background:#ffffff12}
+#tl-json{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0;width:min(760px,94vw);max-height:86vh}#tl-json::backdrop{background:#000a}
+#tl-json pre{margin:0;padding:14px 16px;overflow:auto;max-height:calc(86vh - 56px);font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all}
+#tl-json .bar{display:flex;gap:8px;justify-content:flex-end;padding:8px 12px;border-top:1px solid var(--line)}#tl-json .bar button{background:var(--line);color:var(--fg);border:0;border-radius:6px;padding:5px 14px;cursor:pointer}
+img.emo{height:1.4em;width:auto;vertical-align:middle;margin:0 1px}
 mark{background:#ff4fd833;color:inherit;border-radius:3px}footer{color:var(--dim);font-size:12px;text-align:center;padding:24px}
 `;
 function page({ title, desc = '', canonical = '', robots = 'index,follow', og = {}, body, q = '', jsonld = null, status = 200 }) {
@@ -230,7 +245,7 @@ ${og.image ? `<meta property="og:image" content="${esc(og.image)}">` : `<meta pr
 ${jsonld ? `<script type="application/ld+json">${JSON.stringify(jsonld).replace(/</g, '\\u003c')}</script>` : ''}
 <style>${CSS}</style></head><body>
 <header><a class="brand" href="/">${esc(RELAY_NAME.toUpperCase())}</a>
-<form action="/search" method="get" role="search"><input name="q" value="${esc(q)}" placeholder="Search notes and articles" aria-label="search"><button>Search</button></form></header>
+<form action="/search" method="get" role="search"><input name="q" value="${esc(q)}" placeholder="Search notes and articles" aria-label="search"><button>Search</button></form><a href="/timeline">Timeline</a></header>
 <main>${body}</main><footer>Nostr events stored on wss://${esc(RELAY_NAME)} · <a href="/">relay stats</a></footer></body></html>`];
 }
 const notFound = (msg = 'Not found') => page({ title: `404 · ${RELAY_NAME}`, robots: 'noindex', status: 404,
@@ -621,8 +636,31 @@ ${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
   return page({ title, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
 }
 
+// ---------- live timeline ----------
+const TL_JS = path.join(HERE, 'timeline-client.js');
+let tlJs = { mtime: 0, body: '' };
+function timelineJs() {
+  try { const st = fs.statSync(TL_JS); if (st.mtimeMs !== tlJs.mtime) tlJs = { mtime: st.mtimeMs, body: fs.readFileSync(TL_JS, 'utf8') }; } catch {}
+  return [200, tlJs.body, 'text/javascript; charset=utf-8'];
+}
+function timelinePage() {
+  // the banlist is not published: the page gets salted SHA-256 prefixes, and the browser checks each author against them
+  const salt = cached('tlsalt', 86_400_000, () => crypto.randomBytes(8).toString('hex'));
+  const hidden = cached('tlban:' + banMtime + salt, 600_000, () => [...bans()].map(pk => crypto.createHash('sha256').update(salt + pk).digest('hex').slice(0, 16)));
+  const cfg = { relay: PUBLIC_WS, salt, hidden };
+  const body = `<div class="tl-bar"><h1>Timeline</h1><label><input type="checkbox" id="tl-bridges" checked> Show bridged posts (Mostr, Bluesky, RSS…)</label><span id="tl-status">loading…</span></div>
+<noscript><div class="card"><p class="hint">The live timeline needs JavaScript. Without it, use <a href="/search/nostr">search</a> or a profile page.</p></div></noscript>
+<div id="tl"></div>
+<div id="tl-menu" hidden role="menu"><button data-act="json">View JSON</button><button data-act="open">Open post page</button><button data-act="note">Copy note ID</button><button data-act="npub">Copy author npub</button><button data-act="raw">Copy raw event</button></div>
+<dialog id="tl-json"><pre></pre><div class="bar"><button data-act="copyjson">Copy</button><button data-act="close">Close</button></div></dialog>
+<script type="application/json" id="tl-cfg">${JSON.stringify(cfg).replace(/</g, '\\u003c')}</script>
+<script src="/timeline.js?v=${Math.floor(tlJs.mtime || 0)}" defer></script>`;
+  timelineJs();
+  return page({ title: `Timeline · ${RELAY_NAME}`, desc: `Live timeline of notes on ${RELAY_NAME}`, robots: 'noindex,follow', body });
+}
+
 function robots() {
-  return [200, `User-agent: *\nAllow: /\nDisallow: /search\nDisallow: /*?until=\nSitemap: ${BASE}/sitemap.xml\n`, 'text/plain; charset=utf-8'];
+  return [200, `User-agent: *\nAllow: /\nDisallow: /search\nDisallow: /timeline\nDisallow: /*?until=\nSitemap: ${BASE}/sitemap.xml\n`, 'text/plain; charset=utf-8'];
 }
 // NIP-50 mode has no local index, so the sitemap is built from relay REQs: one file per JST day (last 365 days)
 // with that day's notes and articles, plus the authors of recent profiles. Each is cached for an hour.
@@ -703,6 +741,8 @@ function limited(ip, cost) {
 async function route(u, ip) {
   const p = decodeURIComponent(u.pathname);
   if (p === '/robots.txt') return robots();
+  if (p === '/timeline' || p === '/timeline/') return timelinePage();
+  if (p === '/timeline.js') return timelineJs();
   let m;
   if (SEARCH_MODE === 'nip50') {
     if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemapNip50(null));

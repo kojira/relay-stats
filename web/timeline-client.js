@@ -30,7 +30,7 @@
     return hrp + '1' + [...data, ...cs].map(d => CH[d]).join('');
   }
   const npub = pk => bech32('npub', pk), note = id => bech32('note', id);
-  const fmt = ts => new Date(ts * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 16).replace('-', '/');
+  const fmt = ts => new Date(ts * 1000).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(5, 19).replace('-', '/');
   const IMG = /\.(png|jpe?g|gif|webp|avif)(\?\S*)?$/i, VID = /\.(mp4|webm|mov)(\?\S*)?$/i;
   const SPLIT = /(https?:\/\/[^\s<>"'）」】]+|nostr:(?:npub1|note1|nprofile1|nevent1|naddr1)[0-9a-z]+|#[^\s#＃.,!?、。:;()[\]{}"'<>]+)/gu;
   function rich(e) {
@@ -253,7 +253,8 @@
     const r = b.getBoundingClientRect();
     $menu.hidden = false;
     $menu.style.top = (r.bottom + window.scrollY + 4) + 'px';
-    $menu.style.left = Math.max(8, r.right + window.scrollX - $menu.offsetWidth) + 'px';
+    const vw = document.documentElement.clientWidth;
+    $menu.style.left = (window.scrollX + Math.max(8, Math.min(r.right - $menu.offsetWidth, vw - $menu.offsetWidth - 8))) + 'px';
   });
   const closeMenu = () => { $menu.hidden = true; menuFor = null; };
   document.addEventListener('click', ev => { if (!$menu.hidden && !$menu.contains(ev.target)) closeMenu(); });

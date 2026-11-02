@@ -220,7 +220,8 @@ h1.t{font-size:24px;line-height:1.4;margin:.2em 0 .4em}.article img{max-width:10
 .asug li{display:flex;gap:8px;align-items:center;padding:5px 10px;cursor:pointer;font-size:14px;color:var(--fg)}.asug li.on,.asug li:hover{background:#ffffff12}
 .asug li img{width:26px;height:26px;border-radius:50%;object-fit:cover;background:#123;flex:none}.asug li small{color:var(--dim);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .asug li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#tl{position:relative}.tl-item{position:absolute;left:0;right:0;top:0;padding-bottom:12px}.tl-item .card{margin:0}
+html{overflow-x:hidden}@supports(overflow-x:clip){html,body{overflow-x:clip}}
+#tl{position:relative;overflow-x:clip}.tl-item .card{min-width:0;overflow:hidden}.tl-item .who>div{min-width:0}.tl-item .who .n{overflow-wrap:anywhere}.tl-item .body a{overflow-wrap:anywhere;word-break:break-all}.tl-item .meta{flex-wrap:wrap}.tl-item{position:absolute;left:0;right:0;top:0;padding-bottom:12px}.tl-item .card{margin:0}
 .tl-bar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 12px;color:var(--dim);font-size:13px}.tl-bar h1{margin:0;font-size:18px;color:var(--fg)}
 .tl-bar label{display:flex;gap:6px;align-items:center;cursor:pointer}#tl-status{margin-left:auto}
 .tl-more{margin-left:auto;background:none;border:0;color:var(--dim);font-size:20px;line-height:1;padding:2px 8px;border-radius:6px;cursor:pointer}.tl-more:hover{background:#ffffff12;color:var(--fg)}

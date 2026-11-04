@@ -136,16 +136,18 @@ def main():
     bridge_marked = set()
     kinds30 = collections.Counter()
     latest_note = {}   # pk -> (created_at, content JSON literal) of the newest kind 1 in the scan window
+    client_ev = []     # (pk, created_at, kind, client JSON literal | "-" | None) for the per-client stats
     with open(scan, encoding="utf-8", errors="replace") as f:
         for line in f:
             rec = line.rstrip("\n").split("\t")
             tag = rec[0]
             if tag == "E":
-                _, pk, ca, kind, tgt, content = rec
+                _, pk, ca, kind, tgt, content = rec[:6]
                 ca, kind = int(ca), int(kind)
                 if pk in banned or ca > now + 600:
                     continue
                 kinds30[kind] += 1
+                client_ev.append((pk, ca, kind, rec[6] if len(rec) > 6 else None))
                 if not is_ephemeral(kind) and kind not in NOT_ACTIVITY:
                     actdays[pk].add(day_of(ca))
                 if kind == 1 and content != "-" and ca > latest_note.get(pk, (0,))[0]:
@@ -263,10 +265,84 @@ def main():
     out["today"] = {"date": day_name(today), "active": json.load(open(os.path.join(outdir, "history", f"{day_name(today)}.json")))["active"]}
     write(os.path.join(outdir, "stats.json"), out)
     try:
+        write_clients(outdir, now, today, client_ev, bots)
+    except Exception as e:   # never block the stats update
+        print(f"client stats failed: {e!r}", file=sys.stderr)
+    try:
         write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, profiles, latest_note, bridges, klass, nip05)
     except Exception as e:   # the account list is a debugging aid; never block the stats update
         print(f"accounts list failed: {e!r}", file=sys.stderr)
     render(out, outdir)
+
+
+NO_CLIENT = "(no client tag)"
+
+
+def client_name(lit):
+    """Display name for a client tag value (JSON string literal from the scanner); None = no tag."""
+    if not lit or lit == "-":
+        return None
+    try:
+        v = json.loads(lit)
+    except ValueError:
+        return None
+    v = " ".join(str(v).split())[:60]
+    return v or None
+
+
+def write_clients(outdir, now, today, client_ev, bots):
+    """Per-client (["client", name] tag) stats over the scan window, all kinds; bots and banned pubkeys excluded.
+    clients.json: users / events for 1, 7 and 30 days ending yesterday and the top kinds (30 days);
+    clients/history/YYYY-MM-DD.json: per day {name: [users, events]}. Days still inside the scan window are rewritten
+    on every run, so history builds up past the window and later corrections inside it are picked up."""
+    if not client_ev or all(c is None for _, _, _, c in client_ev):
+        return   # scanner without the client column
+    first = min(day_of(ca) for _, ca, _, _ in client_ev) + 1   # first scanned day may be partial
+    per_day = collections.defaultdict(lambda: collections.defaultdict(lambda: [set(), 0]))
+    kinds = collections.defaultdict(collections.Counter)
+    for pk, ca, kind, lit in client_ev:
+        if pk in bots:
+            continue
+        d = day_of(ca)
+        if d < first or d > today:
+            continue
+        name = client_name(lit) or NO_CLIENT
+        c = per_day[d][name]
+        c[0].add(pk)
+        c[1] += 1
+        if today - 30 <= d < today:
+            kinds[name][kind] += 1
+    done = today - 1
+    rows = []
+    for name in {n for d in per_day.values() for n in d}:
+        r = {"name": name}
+        for key, n in (("d1", 1), ("d7", 7), ("d30", 30)):
+            users, ev = set(), 0
+            for d in range(done - n + 1, done + 1):
+                c = per_day.get(d, {}).get(name)
+                if c:
+                    users |= c[0]
+                    ev += c[1]
+            r[key] = [len(users), ev]
+        r["kinds"] = [[k, n] for k, n in kinds[name].most_common(4)]
+        if r["d30"][0] or r["d30"][1]:
+            rows.append(r)
+    rows.sort(key=lambda r: (-r["d30"][0], -r["d30"][1], r["name"]))
+    hdir = os.path.join(outdir, "clients", "history")
+    os.makedirs(hdir, exist_ok=True)
+    for d in range(first, today + 1):
+        day = per_day.get(d, {})
+        snap = {n: [len(c[0]), c[1]] for n, c in sorted(day.items(), key=lambda x: -len(x[1][0]))}
+        total = [len(set().union(*(c[0] for c in day.values()))) if day else 0, sum(c[1] for c in day.values())]
+        path = os.path.join(hdir, f"{day_name(d)}.json")
+        with open(path + ".tmp", "w") as f:
+            json.dump({"date": day_name(d), "partial": d == today, "total": total, "clients": snap}, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(path + ".tmp", path)
+    out = {"generated_at": now, "date": day_name(done), "since": day_name(first), "clients": rows}
+    path = os.path.join(outdir, "clients.json")
+    with open(path + ".tmp", "w") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(path + ".tmp", path)
 
 
 def write_accounts(outdir, today, actdays, lang, inferred, from_cache, votes, profiles, latest_note, bridges, klass, nip05):
@@ -371,7 +447,7 @@ def render(s, outdir):
         traffic = json.load(open(os.path.join(outdir, "traffic.json")))   # written by traffic.py (relays with an audit trail)
     except (OSError, ValueError):
         pass
-    data = json.dumps({"stats": s, "history": hist, "traffic": traffic}, ensure_ascii=False).replace("<", "\\u003c")
+    data = json.dumps({"stats": s, "history": hist, "traffic": traffic, "clients": client_page_data(outdir)}, ensure_ascii=False).replace("<", "\\u003c")
     html = (tpl.replace("__RELAY_STATS_DATA__", data).replace("__RELAY_NAME__", s["relay"])
                .replace("<!--SUPPORTED_NIPS-->", nips_html(relay_nips(s["relay"])))
                .replace("<!--SEARCH_FORM-->", SEARCH_FORM if (CONFIG.get("SEARCH_STRFRY") or CONFIG.get("SEARCH_NOSTRFY")) else "")
@@ -380,6 +456,32 @@ def render(s, outdir):
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(html)
     os.replace(tmp, os.path.join(outdir, "index.html"))
+
+
+CLIENT_SERIES = 24   # clients with a daily trend line on the page (by 30-day users); the table lists all
+
+
+def client_page_data(outdir):
+    """clients.json + compact daily series {date, c: {name: [users, events]}} for the top clients (None if absent)."""
+    try:
+        cl = json.load(open(os.path.join(outdir, "clients.json")))
+    except (OSError, ValueError):
+        return None
+    top = [r["name"] for r in cl["clients"][:CLIENT_SERIES]]
+    if NO_CLIENT not in top and any(r["name"] == NO_CLIENT for r in cl["clients"]):
+        top.append(NO_CLIENT)
+    keep, hist = set(top), []
+    hdir = os.path.join(outdir, "clients", "history")
+    for name in sorted(n for n in os.listdir(hdir) if n.endswith(".json")) if os.path.isdir(hdir) else []:
+        try:
+            h = json.load(open(os.path.join(hdir, name)))
+        except (OSError, ValueError):
+            continue
+        if h.get("partial"):
+            continue
+        tot = h.get("total") or [0, sum(v[1] for v in h["clients"].values())]
+        hist.append({"date": h["date"], "t": tot, "c": {n: v for n, v in h["clients"].items() if n in keep}})
+    return {"date": cl["date"], "since": cl["since"], "rows": cl["clients"], "series": top, "history": hist}
 
 
 def rerender(outdir):

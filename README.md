@@ -16,6 +16,11 @@ strfry 側は `relay.landingPageFile = "<このディレクトリ>/www/index.htm
 - `template.html`: 見た目。**自由に編集してよい**。`__RELAY_NAME__`・`__RELAY_STATS_DATA__`・`__OG_VERSION__`（OG 画像 URL の日付）だけが置換される。
   編集後すぐ反映: `./venv/bin/python analyze.py --render www`
   strfry は index.html の mtime 変化を検知して再読込する（再ビルド・再起動不要、最大5秒）。
+- クライアント別の統計: イベントの `["client", 名前]` タグごとに、利用者数（pubkey 数）とイベント数を出す（全 kind。タグのないものは `(no client tag)` の1行）。BAN と bot は除く。
+  毎時の実行で `www/clients.json` と `www/clients/history/YYYY-MM-DD.json` を書き、ページの「Clients」に表と日ごとの推移を出す。
+  過去の分は一度だけ作る:
+  `relay-scan <db> 1669852800 0 clients > clients.tsv`（nostrfy は `nostrfy-scan`。全イベントを1行ずつ）→
+  `./venv/bin/python client-backfill.py clients.tsv www [banlist] --profiles scan.tsv`。すでにある日のファイルは上書きしない。
 - `loop.sh`: 1時間ごとに run.sh。`nohup ./loop.sh <relay名> <strfry-db> [banlist] >> loop.log 2>&1 &`
 
 ## nostrfy

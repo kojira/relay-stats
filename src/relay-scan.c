@@ -1,7 +1,8 @@
 #define _DARWIN_C_SOURCE
 // relay-scan: read-only direct LMDB scan of a strfry DB.
 // Output (TSV, one record per line):
-//   E <pubkeyhex> <created_at> <kind> <ptarget-hex|-> <content-json|->   (events in window)
+//   E <pubkeyhex> <created_at> <kind> <ptarget-hex|-> <content-json|-> <client-json|->   (events in window;
+//     client = value of the event's ["client", ...] tag, window mode only)
 //   P <pubkeyhex> <payload-json>                                         (latest kind 0 of each author seen)
 //   S <key> <value>                                                      (summary)
 #include <lmdb.h>
@@ -43,6 +44,21 @@ static int find_content(const char *s, size_t n, const char **o, size_t *ol) {
     while (q < end) { if (*q == '\\') q += 2; else if (*q == '"') break; else q++; }
     if (q >= end) return 0;
     *o = p; *ol = (size_t)(q - p + 1);
+    return 1;
+}
+
+static void trunc_escape(const char *co, size_t *cl);
+// JSON string literal value of the first ["client","..."] tag; an unescaped ["client"," can only occur in tags
+static int find_client(const char *s, size_t n, const char **o, size_t *ol) {
+    const char *key = "[\"client\",\"";
+    const char *p = memmem(s, n, key, strlen(key));
+    if (!p) return 0;
+    p += strlen(key) - 1;
+    const char *q = p + 1, *end = s + n;
+    while (q < end) { if (*q == '\\') q += 2; else if (*q == '"') break; else q++; }
+    if (q >= end) return 0;
+    *o = p; *ol = (size_t)(q - p + 1);
+    if (*ol > 162) { *ol = 161; trunc_escape(p, ol); return 2; }   // keep names short; caller closes the literal
     return 1;
 }
 
@@ -92,15 +108,17 @@ static int ps_has(const pkset *s, const unsigned char *p) {
 #define CHK(x) do { int rc_ = (x); if (rc_) { fprintf(stderr, "%s: %s\n", #x, mdb_strerror(rc_)); return 1; } } while (0)
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: relay-scan <dbdir> <since_unix> [until_unix] [full]\n"
+    if (argc < 3) { fprintf(stderr, "usage: relay-scan <dbdir> <since_unix> [until_unix] [full|clients]\n"
         "  default: walk the created_at index (fast for recent windows)\n"
         "  full:    walk the Event table sequentially (fast for whole-history backfill);\n"
+        "  clients: walk the Event table, one C line per event (pubkey, day, kind, client tag) for client history;\n"
         "           text/target samples are capped per pubkey\n"
         "  RELAY_STATS_TZ_OFFSET: seconds east of UTC for day boundaries (default 32400 = JST)\n"); return 2; }
     uint64_t since = strtoull(argv[2], 0, 10);
     uint64_t until = argc > 3 ? strtoull(argv[3], 0, 10) : UINT64_MAX;
     if (until == 0) until = UINT64_MAX;
     int full = argc > 4 && !strcmp(argv[4], "full");
+    int clients = argc > 4 && !strcmp(argv[4], "clients");
     int64_t tzoff = 32400; // day boundary default: JST
     {
         const char *e = getenv("RELAY_STATS_TZ_OFFSET"); char *endp;
@@ -137,6 +155,28 @@ int main(int argc, char **argv) {
     pkset authors = { 0 }, days = { 0 }, bridges = { 0 };
     char pkh[65], th[65];
     size_t nev = 0;
+
+    if (clients) {   // C <pubkeyhex> <day> <kind> <client-json|->  for every event in [since, until), Event table order
+        MDB_cursor *c; CHK(mdb_cursor_open(txn, dEv, &c));
+        MDB_val k, v;
+        for (int rc = mdb_cursor_get(c, &k, &v, MDB_FIRST); rc == 0; rc = mdb_cursor_get(c, &k, &v, MDB_NEXT)) {
+            const unsigned char *b = v.mv_data;
+            if (v.mv_size < 88) continue;
+            uint64_t ca, kind; memcpy(&ca, b+64, 8); memcpy(&kind, b+72, 8);
+            if (ca < since || ca >= until) continue;
+            const char *cn = NULL; size_t cnl = 0; int fc = 0;
+            MDB_val pv;
+            if (!mdb_get(txn, dPl, &k, &pv) && pv.mv_size > 1 && ((char*)pv.mv_data)[0] == 0)
+                fc = find_client((char*)pv.mv_data + 1, pv.mv_size - 1, &cn, &cnl);
+            hex(b+32, 32, pkh);
+            if (fc) printf("C\t%s\t%u\t%llu\t%.*s%s\n", pkh, (uint32_t)((ca + tzoff) / 86400), (unsigned long long)kind, (int)cnl, cn, fc == 2 ? "\"" : "");
+            else printf("C\t%s\t%u\t%llu\t-\n", pkh, (uint32_t)((ca + tzoff) / 86400), (unsigned long long)kind);
+            nev++;
+        }
+        printf("S\twindow_events\t%zu\n", nev);
+        mdb_txn_abort(txn); mdb_env_close(env);
+        return 0;
+    }
 
 #define HANDLE_EVENT(levp, evv) do { \
         const unsigned char *b = (evv).mv_data; \
@@ -183,17 +223,25 @@ int main(int argc, char **argv) {
             } \
         } \
         int printed = 0; \
+        const char *cn = NULL; size_t cnl = 0; int cnt_trunc = 0; \
+        const char *pl = NULL; size_t pln = 0; \
+        if (!full || (is_text_kind(kind) && tc < TEXT_CAP)) { \
+            MDB_val lk = { 8, (levp) }, pv; \
+            if (!mdb_get(txn, dPl, &lk, &pv) && pv.mv_size > 1 && ((char*)pv.mv_data)[0] == 0) { pl = (char*)pv.mv_data + 1; pln = pv.mv_size - 1; } \
+        } \
+        if (pl && !full) { int fc = find_client(pl, pln, &cn, &cnl); if (!fc) cn = NULL; cnt_trunc = fc == 2; } \
+        char ctail[200]; \
+        if (cn) snprintf(ctail, sizeof ctail, "\t%.*s%s", (int)cnl, cn, cnt_trunc ? "\"" : ""); else strcpy(ctail, full ? "" : "\t-"); \
         if (is_text_kind(kind) && tc < TEXT_CAP) { \
-            MDB_val lk = { 8, (levp) }, pv; const char *co; size_t cl; \
-            if (!mdb_get(txn, dPl, &lk, &pv) && pv.mv_size > 1 && ((char*)pv.mv_data)[0] == 0 && \
-                find_content((char*)pv.mv_data + 1, pv.mv_size - 1, &co, &cl)) { \
+            const char *co; size_t cl; \
+            if (pl && find_content(pl, pln, &co, &cl)) { \
                 int trunc = 0; \
                 if (cl > 1200) { cl = 1199; trunc = 1; trunc_escape(co, &cl); } \
-                printf("E\t%s\t%llu\t%llu\t%s\t%.*s%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, (int)cl, co, trunc ? "\"" : ""); \
+                printf("E\t%s\t%llu\t%llu\t%s\t%.*s%s%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, (int)cl, co, trunc ? "\"" : "", ctail); \
                 printed = 1; tc++; \
             } \
         } \
-        if (!printed && (!full || th[0] != '-')) printf("E\t%s\t%llu\t%llu\t%s\t-\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th); \
+        if (!printed && (!full || th[0] != '-')) printf("E\t%s\t%llu\t%llu\t%s\t-%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, ctail); \
         *cnt = (gc << 16) | tc; \
     } while (0)
 

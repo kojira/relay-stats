@@ -152,6 +152,14 @@
   #accday { background:#0a1420; color:#e8fbff; border:1px solid #1d3346; border-radius:3px; padding:4px 8px; font:inherit; font-size:12px; }
   #accmore { display:block; margin:14px auto 0; }
   body.accmode main > :not(header):not(#acc):not(footer) { display:none !important; }
+  #cli .cname { max-width:260px; overflow:hidden; text-overflow:ellipsis; }
+  #cli tr.none th { color:var(--dim); font-style:italic; }
+  #cli td.k { text-align:left; color:var(--dim); font-size:11px; }
+  #cli tbody tr { cursor:pointer; }
+  #cli tbody tr.sel th { color:var(--c, var(--cyan)); }
+  #cli tbody tr.sel th::before { content:"● "; color:var(--c, var(--cyan)); }
+  #climore { display:block; margin:10px auto 0; background:transparent; color:var(--dim); border:1px solid var(--line); padding:4px 12px; border-radius:4px; font:inherit; font-size:11px; letter-spacing:.12em; cursor:pointer; }
+  #climore:hover { color:var(--cyan); border-color:var(--cyan); }
   footer { margin-top:24px; text-align:center; color:#3c5568; font-size:10px; letter-spacing:.3em; text-transform:uppercase; }
 </style>
 </head>
@@ -226,6 +234,33 @@
       <li><b>Events</b> = EVENT messages received, including rejected ones: <b>Ephemeral</b> = kinds 20000–29999, <b>Non-ephemeral</b> = every other kind, <b>All kinds</b> = both. <b>Sources</b> = distinct connecting addresses (IP / forwarder) that sent at least one in the period.</li>
       <li>Only events written to this relay over its WebSocket are counted; events this relay pulls from other relays (sync / router) are not in the audit trail.</li>
       <li>From this relay's write-policy audit trail (kept 90 days; daily / monthly totals are kept after that). Hourly covers the last 31 days. Hollow points = period not fully covered. <b>By hour of day</b> = average of each clock hour over those days.</li>
+    </ul>
+  </section>
+
+  <section class="panel" id="cli" hidden>
+    <h2>Clients <span class="meta" id="cliinfo"></span></h2>
+    <div class="ctl">
+      <span class="seg" id="climetric"><button data-v="0" class="on">Users</button><button data-v="1">Events</button></span>
+      <span class="seg" id="clipresets"><button data-d="30">30D</button><button data-d="90">90D</button><button data-d="180">6M</button><button data-d="365">1Y</button><button data-d="0">All</button></span>
+      <span class="spacer"></span>
+      <span class="seg" id="clismooth"><button data-v="0" class="on">Raw</button><button data-v="7">7D avg</button></span>
+      <span class="seg" id="clishare"><button data-v="0" class="on">Count</button><button data-v="1">Share %</button></span>
+      <a href="#" class="btn" id="clicsv">CSV ↓</a>
+    </div>
+    <div class="chips" id="clisel"></div>
+    <div class="chartbox"><canvas id="clichart"></canvas><div id="clitip" class="tipbox"></div></div>
+    <div class="wrap" style="margin-top:14px"><table>
+      <thead>
+        <tr><th></th><th colspan="2" style="text-align:center">Last full day</th><th colspan="2" style="text-align:center">7 days</th><th colspan="2" style="text-align:center">30 days</th><th></th></tr>
+        <tr><th>Client</th><th>Users</th><th>Events</th><th>Users</th><th>Events</th><th>Users</th><th>Events</th><th style="text-align:left">Top kinds · 30 days</th></tr>
+      </thead>
+      <tbody id="clirows"></tbody>
+    </table></div>
+    <button class="btn" id="climore" hidden>Show all ↓</button>
+    <ul class="note" style="margin:10px 0 0">
+      <li>Grouped by the <code>["client", name]</code> tag of each event, all kinds. Events without the tag are one row, <b>(no client tag)</b>: many apps don't add it, and zaps, gift-wrapped DMs and bridged posts usually have none. The tag is set by the app and can be anything, so treat names as self-reported.</li>
+      <li><b>Users</b> = distinct pubkeys that wrote at least one event with that client in the period; one person using two apps counts in both. Banned pubkeys and bot accounts are excluded, as above; Fediverse bridge accounts are included.</li>
+      <li>Click a row to add or remove its line on the chart. Daily history starts when this stats page began recording clients (about 31 days before the first day shown is backfilled from stored events).</li>
     </ul>
   </section>
 
@@ -623,6 +658,148 @@ setRange(365);
   c.addEventListener('mouseleave', () => { $('ephtip').style.display = 'none'; draw2(); });
   window.addEventListener('resize', () => draw2());
   draw2();
+})();
+
+// ---- clients ([\"client\", name] tag) ---------------------------------------------------
+(() => {
+  const C = D.clients;
+  if (!C || !C.rows || !C.rows.length) return;
+  $('cli').hidden = false;
+  const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const NONE = '(no client tag)';
+  const CH = C.history, SER = C.series;
+  const PAL = ['#00e5ff', '#ffb84d', '#ff3df2', '#7dff9b', '#ff5c7a', '#ffe14d', '#4d9bff', '#c2ff4d', '#a77bff', '#ff9f4d', '#4dffd2', '#e8fbff'];
+  const color = {}; let ci = 0;
+  SER.forEach(n => color[n] = n === NONE ? '#5f7d91' : PAL[ci++ % PAL.length]);
+  const st = { m: 0, smooth: 0, share: false, from: '', on: new Set(SER.filter(n => n !== NONE).slice(0, 6)) };
+  const first = CH.length ? CH[0].date : '', last = CH.length ? CH[CH.length - 1].date : '';
+  let g = null, view = [], series = {};
+
+  function chips() {
+    $('clisel').innerHTML = SER.map(n => `<span class="chip ${st.on.has(n) ? 'on' : ''}" data-n="${esc(n)}" style="--c:${color[n]}"><i></i>${esc(n)}</span>`).join('');
+    $('clisel').querySelectorAll('.chip').forEach(c => c.onclick = () => toggle(c.dataset.n));
+  }
+  function toggle(n) {
+    if (!color[n]) return;
+    st.on.has(n) ? st.on.delete(n) : st.on.add(n);
+    chips(); table(); draw3();
+  }
+  // table
+  let all = false;
+  function table() {
+    const rows = all ? C.rows : C.rows.slice(0, 30);
+    $('clirows').innerHTML = rows.map(r => {
+      const cls = [r.name === NONE ? 'none' : '', st.on.has(r.name) ? 'sel' : ''].join(' ');
+      const k = r.kinds.map(([kd, n]) => `${kd}:${fmt(n)}`).join(' · ');
+      return `<tr class="${cls}" data-n="${esc(r.name)}" style="--c:${color[r.name] || 'var(--cyan)'}"><th class="cname" title="${esc(r.name)}">${esc(r.name)}</th>` +
+        ['d1', 'd7', 'd30'].map(w => `<td class="n">${fmt(r[w][0])}</td><td class="s">${fmt(r[w][1])}</td>`).join('') + `<td class="k">${k}</td></tr>`;
+    }).join('');
+    $('clirows').querySelectorAll('tr').forEach(tr => tr.onclick = () => toggle(tr.dataset.n));
+    $('climore').hidden = all || C.rows.length <= 30;
+    $('climore').textContent = `Show all ${C.rows.length} ↓`;
+  }
+  $('climore').onclick = () => { all = true; table(); };
+
+  function compute() {
+    view = CH.filter(h => !st.from || h.date >= st.from);
+    const lo = CH.length - view.length;
+    series = {};
+    const raw = (h, n) => h.c[n]?.[st.m] ?? 0;
+    for (const n of SER) {
+      if (!st.on.has(n)) continue;
+      const out = [];
+      for (let j = 0; j < view.length; j++) {
+        const gi = lo + j; let sum = 0, cnt = 0;
+        for (let k = Math.max(0, gi - (st.smooth || 1) + 1); k <= gi; k++) { sum += raw(CH[k], n); cnt++; }
+        let v = sum / cnt;
+        if (st.share) {   // of all active users / all events that day (a user of two apps counts in both)
+          let tsum = 0; for (let k = Math.max(0, gi - (st.smooth || 1) + 1); k <= gi; k++) tsum += CH[k].t[st.m];
+          v = tsum ? 100 * sum / tsum : 0;
+        }
+        out.push(v);
+      }
+      series[n] = out;
+    }
+  }
+  function draw3(hover = -1) {
+    const c = $('clichart'), dpr = window.devicePixelRatio || 1;
+    const W = c.clientWidth, Hh = c.clientHeight;
+    if (c.width !== W * dpr || c.height !== Hh * dpr) { c.width = W * dpr; c.height = Hh * dpr; }
+    const x = c.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W, Hh);
+    x.font = '11px ' + getComputedStyle(document.body).fontFamily;
+    if (hover < 0) compute();
+    const P = { l: 56, r: 18, t: 20, b: 34 }, iw = W - P.l - P.r, ih = Hh - P.t - P.b;
+    const keys = Object.keys(series);
+    if (view.length < 2 || !keys.length) {
+      x.fillStyle = '#6f8aa3'; x.fillText(view.length < 2 ? 'COLLECTING DAILY DATA…' : 'SELECT A CLIENT', P.l, Hh / 2); g = null;
+      $('cliinfo').textContent = `${C.date} · ${C.rows.length} clients`; return;
+    }
+    const peak = Math.max(1, ...keys.flatMap(n => series[n]));
+    const ticks = niceTicks(peak * 1.08, 5);
+    while (ticks.length > 1 && ticks[ticks.length - 1] < peak * 1.08) ticks.push(ticks[ticks.length - 1] + (ticks[1] - ticks[0]));   // top tick clears the data
+    const max = ticks[ticks.length - 1];
+    const X = j => P.l + j * iw / (view.length - 1), Y = v => P.t + ih - v / max * ih;
+    g = { P, iw, X };
+    x.lineWidth = 1;
+    ticks.forEach(v => {
+      const y = Math.round(Y(v)) + .5;
+      x.strokeStyle = 'rgba(0,229,255,.08)'; x.beginPath(); x.moveTo(P.l, y); x.lineTo(W - P.r, y); x.stroke();
+      x.fillStyle = '#6f8aa3'; x.textAlign = 'right'; x.fillText(st.share ? v + '%' : short(v), P.l - 8, y + 4);
+    });
+    const nt = Math.max(2, Math.min(8, Math.floor(iw / 120)));
+    x.textAlign = 'center';
+    for (let t = 0; t <= nt; t++) {
+      const j = Math.round(t * (view.length - 1) / nt);
+      x.fillStyle = '#6f8aa3'; x.fillText(view[j].date.slice(2), Math.min(Math.max(X(j), P.l + 30), W - P.r - 30), Hh - 12);
+    }
+    x.textAlign = 'left';
+    keys.forEach(n => {
+      const ys = series[n], col = color[n];
+      x.beginPath(); ys.forEach((v, j) => j ? x.lineTo(X(j), Y(v)) : x.moveTo(X(j), Y(v)));
+      x.save(); x.strokeStyle = col; x.lineWidth = 1.8; x.lineJoin = 'round'; x.shadowColor = col; x.shadowBlur = 6; x.stroke(); x.restore();
+    });
+    if (hover >= 0) {
+      const px = X(hover);
+      x.strokeStyle = 'rgba(0,229,255,.6)'; x.setLineDash([3, 3]); x.beginPath(); x.moveTo(px, P.t); x.lineTo(px, P.t + ih); x.stroke(); x.setLineDash([]);
+      keys.forEach(n => { x.fillStyle = '#05070d'; x.strokeStyle = color[n]; x.lineWidth = 2; x.beginPath(); x.arc(px, Y(series[n][hover]), 3.5, 0, 7); x.fill(); x.stroke(); });
+    }
+    $('cliinfo').textContent = `${['users', 'events'][st.m]} per day${st.smooth ? ' · 7-day avg' : ''}${st.share ? ' · % of all ' + ['users', 'events'][st.m] : ''} · ${view[0].date} → ${view[view.length - 1].date} · ${C.rows.length} clients`;
+  }
+  const c = $('clichart');
+  c.addEventListener('mousemove', e => {
+    if (!g) return;
+    const r = c.getBoundingClientRect(), mx = e.clientX - r.left;
+    const j = Math.max(0, Math.min(view.length - 1, Math.round((mx - g.P.l) / g.iw * (view.length - 1))));
+    draw3(j);
+    const tip = $('clitip'), keys = Object.keys(series).sort((a, b) => series[b][j] - series[a][j]);
+    tip.innerHTML = `<b>${view[j].date}</b>` + keys.map(n => `<div class="row"><span style="color:${color[n]}">● ${esc(n)}</span><span>${st.share ? series[n][j].toFixed(1) + '%' : fmt(Math.round(series[n][j]))}</span></div>`).join('');
+    tip.style.display = 'block';
+    const px = g.X(j), tw = tip.offsetWidth;
+    tip.style.left = (px + 16 + tw > r.width ? px - 16 - tw : px + 16) + 'px'; tip.style.top = '20px';
+  });
+  c.addEventListener('mouseleave', () => { $('clitip').style.display = 'none'; draw3(); });
+  window.addEventListener('resize', () => draw3());
+  seg('climetric', b => { st.m = +b.dataset.v; draw3(); });
+  seg('clismooth', b => { st.smooth = +b.dataset.v; draw3(); });
+  seg('clishare', b => { st.share = b.dataset.v === '1'; draw3(); });
+  seg('clipresets', b => {
+    const d = +b.dataset.d;
+    if (!d) st.from = '';
+    else { const t = new Date(last + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() - d + 1); st.from = t.toISOString().slice(0, 10); }
+    draw3();
+  });
+  $('clicsv').onclick = e => {
+    e.preventDefault();
+    const rows = [['date', ...SER.flatMap(n => [`${n} users`, `${n} events`])]];
+    CH.forEach(h => rows.push([h.date, ...SER.flatMap(n => h.c[n] || [0, 0])]));
+    const q = v => /[",\n]/.test(v) ? '"' + String(v).replace(/"/g, '""') + '"' : v;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([rows.map(r => r.map(q).join(',')).join('\n')], { type: 'text/csv' }));
+    a.download = `${S.relay}-clients.csv`; a.click();
+  };
+  $('clipresets').querySelector('[data-d="90"]').classList.add('on');
+  { const t = new Date((last || C.date) + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() - 89); st.from = t.toISOString().slice(0, 10); }
+  chips(); table(); draw3();
 })();
 
 // ---- accounts by language (#accounts=<lang>) -----------------------------------------

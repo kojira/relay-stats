@@ -1,12 +1,13 @@
 #define _DARWIN_C_SOURCE
 #define _GNU_SOURCE
 // nostrfy-scan: read-only direct LMDB scan of a nostrfy DB. Same TSV output as relay-scan:
-//   E <pubkeyhex> <created_at> <kind> <ptarget-hex|-> <content-json|->
+//   E <pubkeyhex> <created_at> <kind> <ptarget-hex|-> <content-json|-> <client-json|->   (client: window mode only)
+//   C <pubkeyhex> <day> <kind> <client-json|->   (clients mode: every event, for client history)
 //   P <pubkeyhex> <payload-json-string>   (latest kind 0 of each author seen)
 //   B <pubkeyhex>                         (Fediverse bridge account)
 //   D <pubkeyhex> <day>                   (full mode: first activity per pubkey-day)
 //   S <key> <value>
-// usage: nostrfy-scan <dbdir> <since_unix> [until_unix|0] [full]
+// usage: nostrfy-scan <dbdir> <since_unix> [until_unix|0] [full|clients]
 //        nostrfy-scan <dbdir> <since_unix> <until_unix|0> json <kind,kind,...>   (event JSON lines; search-index.py)
 //
 // nostrfy (heed/LMDB) tables used (src/db/store.rs, v0.1.15):
@@ -46,6 +47,21 @@ static int find_str(const char *s, size_t n, const char *key, const char **o, si
     while (q < end) { if (*q == '\\') q += 2; else if (*q == '"') break; else q++; }
     if (q >= end) return 0;
     *o = p; *ol = (size_t)(q - p + 1);
+    return 1;
+}
+
+static void trunc_escape(const char *co, size_t *cl);
+// JSON string literal value of the first ["client","..."] tag (2 = cut to 160 bytes; caller closes the literal)
+static int find_client(const char *s, size_t n, const char **o, size_t *ol) {
+    const char *key = "[\"client\",\"";
+    const char *p = memmem(s, n, key, strlen(key));
+    if (!p) return 0;
+    p += strlen(key) - 1;
+    const char *q = p + 1, *end = s + n;
+    while (q < end) { if (*q == '\\') q += 2; else if (*q == '"') break; else q++; }
+    if (q >= end) return 0;
+    *o = p; *ol = (size_t)(q - p + 1);
+    if (*ol > 162) { *ol = 161; trunc_escape(p, ol); return 2; }
     return 1;
 }
 
@@ -151,11 +167,12 @@ static int json_dump(const char *dir, uint64_t since, uint64_t until, const char
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: nostrfy-scan <dbdir> <since_unix> [until_unix|0] [full | json <kinds>]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: nostrfy-scan <dbdir> <since_unix> [until_unix|0] [full | clients | json <kinds>]\n"); return 2; }
     uint64_t since = strtoull(argv[2], 0, 10);
     uint64_t until = argc > 3 ? strtoull(argv[3], 0, 10) : UINT64_MAX;
     if (until == 0) until = UINT64_MAX;
     int full = argc > 4 && !strcmp(argv[4], "full");
+    int clients = argc > 4 && !strcmp(argv[4], "clients");
     if (argc > 5 && !strcmp(argv[4], "json")) return json_dump(argv[1], since, until, argv[5]);
     int64_t tzoff = 32400;
     { const char *e = getenv("RELAY_STATS_TZ_OFFSET"); char *endp;
@@ -203,13 +220,22 @@ int main(int argc, char **argv) {
         uint64_t kind = be64(m);
         const unsigned char *pk = m + 16;
         int need_json = 0;
-        uint32_t *cnt = ps_add(&authors, pk);
+        uint32_t dummy = 0, *cnt = clients ? &dummy : ps_add(&authors, pk);
         unsigned tc = *cnt & 0xFFFF, gc = *cnt >> 16;
         hex(pk, 32, pkh); strcpy(th, "-");
-        need_json = (is_target_kind(kind) && gc < TGT_CAP) || (is_text_kind(kind) && tc < TEXT_CAP)
+        need_json = !full || clients || (is_target_kind(kind) && gc < TGT_CAP) || (is_text_kind(kind) && tc < TEXT_CAP)
                     || ((kind == 0 || kind == 10002 || is_text_kind(kind)) && !ps_has(&bridges, pk));
         const char *js = NULL; size_t jn = 0;
         if (need_json && !mdb_get(txn, dEv, &idk, &ev)) { js = ev.mv_data; jn = ev.mv_size; }
+        const char *cn = NULL; size_t cnl = 0; int fc = 0;
+        if (js && !full) fc = find_client(js, jn, &cn, &cnl);
+        char ctail[200];
+        if (fc) snprintf(ctail, sizeof ctail, "\t%.*s%s", (int)cnl, cn, fc == 2 ? "\"" : ""); else strcpy(ctail, full ? "" : "\t-");
+        if (clients) {
+            printf("C\t%s\t%u\t%llu%s\n", pkh, (uint32_t)((ca + tzoff) / 86400), (unsigned long long)kind, ctail);
+            nev++;
+            continue;
+        }
         if (js && is_target_kind(kind) && gc < TGT_CAP && first_ptag(js, jn, th)) gc++;
         nev++;
         if (js && !ps_has(&bridges, pk)) {
@@ -229,14 +255,15 @@ int main(int argc, char **argv) {
         if (js && is_text_kind(kind) && tc < TEXT_CAP && find_str(js, jn, "\"content\":", &co, &cl)) {
             int trunc = 0;
             if (cl > 1200) { cl = 1199; trunc = 1; trunc_escape(co, &cl); }
-            printf("E\t%s\t%llu\t%llu\t%s\t%.*s%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, (int)cl, co, trunc ? "\"" : "");
+            printf("E\t%s\t%llu\t%llu\t%s\t%.*s%s%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, (int)cl, co, trunc ? "\"" : "", ctail);
             printed = 1; tc++;
         }
-        if (!printed && (!full || th[0] != '-')) printf("E\t%s\t%llu\t%llu\t%s\t-\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th);
+        if (!printed && (!full || th[0] != '-')) printf("E\t%s\t%llu\t%llu\t%s\t-%s\n", pkh, (unsigned long long)ca, (unsigned long long)kind, th, ctail);
         *cnt = (gc << 16) | tc;
     }
     mdb_cursor_close(c);
     printf("S\twindow_events\t%zu\n", nev);
+    if (clients) { mdb_txn_abort(txn); mdb_env_close(env); return 0; }
     printf("S\twindow_authors\t%zu\n", authors.n);
     if (full) printf("S\tactive_pubkey_days\t%zu\n", days.n);
 

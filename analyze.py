@@ -39,7 +39,8 @@ TZ_OFFSET = int(datetime.datetime.now(TZ).utcoffset().total_seconds())
 TZ_LABEL = CONFIG["TIMEZONE"]
 # full-text search box (only where web/server.mjs serves /search: SEARCH_STRFRY / SEARCH_NOSTRFY set in relay-stats.conf)
 SEARCH_FORM = ('<form class="sform" action="/search" method="get" role="search">'
-               '<input name="q" placeholder="Search notes and articles" aria-label="search"><button>Search</button></form>')
+               '<input name="q" placeholder="Search notes and articles" aria-label="search"><button>Search</button></form>'
+               '<nav class="pnav"><a href="/timeline">Timeline</a><a href="/search">Search</a></nav>')
 
 
 def day_of(ts):

@@ -3,7 +3,7 @@
 //
 //   /npub1…            profile + latest notes          /npub/<hex>  -> 301 /npub1…
 //   /note1…            one note (kind 1) or article    /event/<hex> -> 301 /note1…
-//   /search/<words>    full-text search (noindex,follow)  /search?q= -> 301 /search/<q>
+//   /search/<words>    full-text search (noindex,follow)  /search?q= -> 301 /search/<q>; no query -> search form (200)
 //   /search?suggest=…  author suggestions for the search filter (JSON: name / display_name match)
 //   /timeline          live timeline of kind 1, read by the browser straight from the relay (timeline-client.js)
 //   /robots.txt, /sitemap.xml, /sitemap-<n>.xml
@@ -354,19 +354,21 @@ function filterQuery(f, extra = {}) {
   for (const [k, v] of Object.entries(extra)) o.set(k, v);
   const s = o.toString(); return s ? '?' + s : '';
 }
-function filterForm(q, f) {
+function filterForm(q, f, home = false) {
   const sel = (v, l) => `<option value="${v}"${f.kind === v ? ' selected' : ''}>${l}</option>`;
-  const open = f.since || f.until || f.author || f.kind;
-  return `<details class="card filters"${open ? ' open' : ''}><summary>Filters${open ? ' (active)' : ''}</summary>
-<form action="/search" method="get"><input type="hidden" name="q" value="${esc(q)}">
+  const open = home || f.since || f.until || f.author || f.kind;
+  return `<details class="card filters"${open ? ' open' : ''}><summary>${home ? 'Search' : 'Filters' + (open ? ' (active)' : '')}</summary>
+<form action="/search" method="get">${home
+  ? `<label class="wide">Words <input name="q" value="${esc(q)}" placeholder="words to search for" autofocus required></label>`
+  : `<input type="hidden" name="q" value="${esc(q)}">`}
 <label>From <input type="date" name="since" value="${f.since ? ymd(f.since) : ''}"></label>
 <label>To <input type="date" name="until" value="${f.until ? ymd(f.until) : ''}"></label>
 <label>Type <select name="kind">${sel('', 'All')}${sel('note', 'Notes (kind 1)')}${sel('article', 'Articles (kind 30023)')}${SEARCH_MODE === 'nip50' ? sel('chat', 'Chat (kind 40/41/42)') : ''}</select></label>
 <label class="wide">Author${f.authorLabel ? ` <span class="aname">${esc(f.authorLabel)}</span>` : ''}<span class="asug"><input name="author" value="${f.author ? npubOf(f.author) : esc(f.authorName || '')}" placeholder="name or npub1…" autocomplete="off" spellcheck="false"><ul hidden></ul></span></label>
-<div class="presets">${[['24h', 1], ['7 days', 7], ['30 days', 30], ['1 year', 365]].map(([l, d]) =>
+${home ? '' : `<div class="presets">${[['24h', 1], ['7 days', 7], ['30 days', 30], ['1 year', 365]].map(([l, d]) =>
   `<a href="/search/${encodeURIComponent(q)}${filterQuery({ ...f, since: Math.floor(Date.now() / 1000) - d * 86400, until: 0 })}" rel="nofollow">${l}</a>`).join('')}
-${open ? `<a href="/search/${encodeURIComponent(q)}" rel="nofollow">clear</a>` : ''}</div>
-<button>Apply</button></form></details>${AUTHOR_JS}`;
+${open ? `<a href="/search/${encodeURIComponent(q)}" rel="nofollow">clear</a>` : ''}</div>`}
+<button>${home ? 'Search' : 'Apply'}</button></form></details>${AUTHOR_JS}`;
 }
 // ---- author suggestions: people whose name / display_name contains the typed text ----
 // Ranked: whole name equal, then name starts with it, then contains it; ties by notes in the last 30 days.
@@ -537,7 +539,7 @@ async function searchPageNip50(q, sp) {
   const f = parseFilters(sp), cursor = +(sp.get('cursor') || 0) || 0;
   const head = `<p class="hint">Results for <b>${esc(q)}</b>`;
   const title = `"${q}" · search · ${RELAY_NAME}`;
-  const fail = msg => page({ title, robots: 'noindex,follow', q, status: 404, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
+  const fail = msg => page({ title, robots: 'noindex,follow', q, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
   if (f.badAuthor) return fail('Author must be a name, an npub1… / nprofile1… or a 64-character hex pubkey.');
   if (f.authorName) return page({ title, robots: 'noindex,follow', q, body: filterForm(q, f) + await authorChoices(q, f) });
   if (f.author) f.authorLabel = nameOf(f.author, (await profileOf(f.author)).p);
@@ -582,16 +584,27 @@ ${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
   return page({ title, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
 }
 
+// /search with no words: the search form (filters kept from the URL), 200 so links to /search work
+async function searchHome(sp) {
+  const f = parseFilters(sp);
+  if (f.author) f.authorLabel = nameOf(f.author, (await profileOf(f.author)).p);
+  const how = SEARCH_MODE === 'nip50'
+    ? 'Notes, articles and chat messages stored on this relay. Japanese is matched by 2-character pieces, other languages by words.'
+    : 'Notes and articles stored on this relay.';
+  return page({ title: `Search · ${RELAY_NAME}`, desc: `Search notes on ${RELAY_NAME}`, robots: 'noindex,follow',
+    body: filterForm('', f, true) + `<div class="card"><p class="hint">${how} Add an author (name or npub), a type or dates to narrow the results.</p></div>` });
+}
+
 async function searchPage(q, sp) {
   q = q.trim().slice(0, 100);
-  if (!q) return notFound('Empty query');
+  if (!q) return searchHome(sp);
   if (SEARCH_MODE === 'nip50') return searchPageNip50(q, sp);
   const d = sdb();
-  if (!d) return notFound('Search index is not ready yet');
+  if (!d) return page({ title: `Search · ${RELAY_NAME}`, robots: 'noindex', status: 503, body: '<div class="card"><p class="hint">Search index is not ready yet.</p></div>' });
   const f = parseFilters(sp), cursor = +(sp.get('cursor') || 0) || 0;
   const head = `<p class="hint">Results for <b>${esc(q)}</b>`;
   const title = `"${q}" · search · ${RELAY_NAME}`;
-  const fail = msg => page({ title, robots: 'noindex,follow', q, status: 404, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
+  const fail = msg => page({ title, robots: 'noindex,follow', q, body: filterForm(q, f) + `<div class="card"><p class="hint">${msg}</p></div>` });
   if (f.badAuthor) return fail('Author must be a name, an npub1… / nprofile1… or a 64-character hex pubkey.');
   if (f.authorName) return page({ title, robots: 'noindex,follow', q, body: filterForm(q, f) + await authorChoices(q, f) });
   if (f.author) f.authorLabel = nameOf(f.author, (await profileOf(f.author)).p);
@@ -757,7 +770,7 @@ async function route(u, ip) {
   if (p === '/search' || p === '/search/') {
     const q = (u.searchParams.get('q') || '').trim();
     const rest = new URLSearchParams([...u.searchParams].filter(([k, v]) => k !== 'q' && v !== ''));
-    return q ? [301, '', '', `/search/${encodeURIComponent(q)}${rest.size ? '?' + rest : ''}`] : notFound('Empty query');
+    return q ? [301, '', '', `/search/${encodeURIComponent(q)}${rest.size ? '?' + rest : ''}`] : searchHome(rest);
   }
   if ((m = p.match(/^\/search\/(.+)$/))) { const sp = u.searchParams; sp.ip = ip; return searchPage(m[1], sp); }
   if ((m = p.match(/^\/npub\/([0-9a-f]{64})$/))) return [301, '', '', '/' + npubOf(m[1])];

@@ -90,6 +90,32 @@ def scan(flt):
         raise SystemExit(f"search-index: scan failed ({p.returncode})")
 
 
+PRUNE_EVERY = 86400
+
+
+def prune(db, started):
+    """Once a day: drop index rows whose event the relay no longer has (removed by the operator, expired, vanished).
+    NIP-09 deletions are handled every run by apply_deletion; this catches removals that leave no kind 5 behind."""
+    last = db.execute("SELECT v FROM meta WHERE k='last_prune'").fetchone()
+    if last and started - int(last[0]) < PRUNE_EVERY:
+        return 0
+    have = set()
+    for e in scan({"kinds": list(KINDS_TEXT)}):
+        have.add(bytes.fromhex(e["id"]))
+    if not have:                                   # an empty scan is a failure, never a reason to empty the index
+        return 0
+    gone = [r[0] for r in db.execute("SELECT rowid, id FROM notes") if r[1] not in have]
+    if len(gone) > max(1000, len(have) // 2):     # guard: a partial scan must not wipe the index
+        print(f"{time.strftime('%F %T')} search-index: prune skipped ({len(gone)} rows missing of {len(have)} seen)", flush=True)
+        return 0
+    db.execute("BEGIN")
+    for rowid in gone:
+        delete_rowid(db, rowid)
+    db.execute("INSERT OR REPLACE INTO meta(k, v) VALUES('last_prune', ?)", (str(started),))
+    db.execute("COMMIT")
+    return len(gone)
+
+
 def put_note(db, e):
     eid, pk = bytes.fromhex(e["id"]), bytes.fromhex(e["pubkey"])
     content = e.get("content", "")[:MAX_CONTENT]
@@ -252,13 +278,16 @@ def main():
                 continue
         db.execute("COMMIT")
     db.execute("INSERT OR REPLACE INTO meta(k, v) VALUES('last_run', ?)", (str(started),))
+    if not full and os.environ.get("SEARCH_NOSTRFY"):   # nostrfy: small DB, removals leave no kind 5 (strfry relays
+        stats["pruned"] = prune(db, started)             # search through the relay instead, and a full id scan is costly)
     for term in short_wanted(db):                 # after the notes are in, so a new word covers everything
         build_short(db, term)
     if full:
         db.execute("INSERT INTO notes_fts(notes_fts) VALUES('optimize')")
         db.execute("INSERT INTO profiles_fts(profiles_fts) VALUES('optimize')")
     print(f"{time.strftime('%F %T')} search-index {'full' if full else 'incremental'}: +{stats['notes']} notes, "
-          f"+{stats['profiles']} profiles, -{stats['deleted']} deleted ({time.time() - t0:.0f}s)", flush=True)
+          f"+{stats['profiles']} profiles, -{stats['deleted']} deleted"
+          f"{', -' + str(stats['pruned']) + ' gone from the relay' if stats.get('pruned') else ''} ({time.time() - t0:.0f}s)", flush=True)
     db.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # the file is complete on its own (it may be renamed into place)
     db.close()
 

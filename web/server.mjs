@@ -39,6 +39,8 @@ const SEARCH_DB = process.env.WEB_SEARCH_DB || path.join(HERE, '..', 'state', 's
 const BANLIST = process.env.WEB_BANLIST || '';
 const PUBLIC_WS = process.env.WEB_PUBLIC_WS || BASE.replace(/^http/, 'ws');
 const PAGE = 30, SITEMAP_PAGE = 45000;
+// search paging: one relay/DB fetch covers a block of up to BLOCK_PAGES pages; page numbers within it, then the next block by cursor
+const BLOCK_PAGES = 16, BLOCK = BLOCK_PAGES * PAGE, SEARCH_COUNT_CAP = 100000;
 const HEX64 = /^[0-9a-f]{64}$/;
 
 // ---------- banlist (hot reload) ----------
@@ -81,6 +83,10 @@ function relay() {
   });
   ws.addEventListener('message', m => {
     let d; try { d = JSON.parse(m.data); } catch { return; }
+    if (d[0] === 'COUNT' || (d[0] === 'CLOSED' && countPending.has(d[1]))) {
+      const cb = countPending.get(d[1]); if (!cb) return; countPending.delete(d[1]);
+      cb(d[0] === 'COUNT' && d[2] && Number.isFinite(d[2].count) ? d[2] : null); return;
+    }
     const p = pending.get(d[1]);
     if (!p) return;
     if (d[0] === 'EVENT') p.events.push(d[2]);
@@ -90,6 +96,17 @@ function relay() {
   ws.addEventListener('close', () => { for (const [k, p] of pending) { clearTimeout(p.t); p.res(p.events); pending.delete(k); } ws = null; });
   return wsReady;
 }
+// NIP-45 COUNT (search counts can take several seconds on common words)
+async function count(filter, ms = 25000) {
+  await relay();
+  const id = 'c' + (++subSeq);
+  return new Promise(res => {
+    const t = setTimeout(() => { countPending.delete(id); res(null); }, ms);
+    countPending.set(id, v => { clearTimeout(t); res(v); });
+    ws.send(JSON.stringify(['COUNT', id, filter]));
+  });
+}
+const countPending = new Map();
 async function req(...filters) {
   await relay();
   const id = 'w' + (++subSeq);
@@ -209,7 +226,7 @@ main{max-width:760px;margin:0 auto;padding:18px}
 .prof{display:flex;gap:16px;align-items:flex-start}.prof img.av{width:96px;height:96px;border-radius:50%;object-fit:cover;background:#123}
 .prof h1{margin:0;font-size:22px}.banner{width:100%;max-height:200px;object-fit:cover;border-radius:10px;margin-bottom:12px}
 h1.t{font-size:24px;line-height:1.4;margin:.2em 0 .4em}.article img{max-width:100%}.article pre{overflow:auto;background:#0004;padding:10px;border-radius:6px}
-.pager{display:flex;justify-content:space-between;margin:16px 0}.hint{color:var(--dim);font-size:13px}
+.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:16px 0;flex-wrap:wrap}.pager .pages{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;flex:1}.pager .pages a,.pager .pages b{min-width:30px;text-align:center;padding:3px 6px;border-radius:6px;border:1px solid var(--line)}.pager .pages b.cur{background:var(--acc);color:#05070d;border-color:transparent}.hint{color:var(--dim);font-size:13px}
 .filters summary{cursor:pointer;color:var(--dim)}.filters form{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin-top:10px}
 .filters label{display:flex;flex-direction:column;font-size:12px;color:var(--dim);gap:3px}.filters label.wide{flex:1;min-width:240px}
 .filters input,.filters select{background:var(--bg);border:1px solid var(--line);color:var(--fg);padding:6px 8px;border-radius:6px;font:inherit;font-size:14px;color-scheme:dark}
@@ -483,6 +500,32 @@ function logShortQuery(words, ip) {
     .map(w => `${Math.floor(Date.now() / 1000)}\t${w.replace(/[\t\n\r]/g, ' ')}\n`).join('');
   if (lines) fs.appendFile(QUERY_LOG, lines, () => {});
 }
+// pager: page numbers 1..pages inside the current block (pg), "older" = next block (cursor), "newer" = browser back / first
+function pagerHtml(q, f, { pg, pages, cursorArgs, nextBlock, blockNo, offset, seen = [] }) {
+  const tail = seen.map(id => '&seen=' + id).join('');   // same-second events from the previous block, skipped again on every page
+  const href = extra => `/search/${encodeURIComponent(q)}${filterQuery(f, { ...cursorArgs, ...extra })}${tail}`;
+  // offset = pages in earlier blocks (carried in the block link as o=), so numbers continue across blocks
+  const nums = [];
+  for (let i = 1; i <= pages; i++) {
+    if (pages > 11 && i !== 1 && i !== pages && Math.abs(i - pg) > 3) { if (nums[nums.length - 1] !== '…') nums.push('…'); continue; }
+    nums.push(i === pg ? `<b class="cur">${offset + i}</b>` : `<a href="${href({ pg: i })}" rel="nofollow">${offset + i}</a>`);
+  }
+  const prev = pg > 1 ? `<a href="${href({ pg: pg - 1 })}" rel="nofollow">← newer</a>` : (blockNo ? `<a href="/search/${encodeURIComponent(q)}${filterQuery(f)}" rel="nofollow">⇤ newest</a>` : '<span></span>');
+  const next = pg < pages ? `<a href="${href({ pg: pg + 1 })}" rel="nofollow">older →</a>` : (nextBlock ? `<a href="${nextBlock}" rel="nofollow">older →</a>` : '<span></span>');
+  return `<nav class="pager">${prev}<span class="pages">${nums.join(' ')}</span>${next}</nav>`;
+}
+const countText = c => !c ? '' : c.count >= SEARCH_COUNT_CAP || c.limited ? `${fmtN(SEARCH_COUNT_CAP)}+ results` : `${fmtN(c.count)} result${c.count === 1 ? '' : 's'}`;
+const fmtN = n => Number(n).toLocaleString('en-US');
+// totals are cached per query+filters: COUNT is slow for common words, so it runs once and later pages reuse it
+function searchCount(key, fn) {
+  const c = cache.get('cnt:' + key);
+  if (c && c.exp > Date.now()) return c.v;
+  const v = Promise.resolve().then(fn).catch(() => null);
+  cache.set('cnt:' + key, { v, exp: Date.now() + 600_000 });
+  v.then(r => { if (r === null) cache.delete('cnt:' + key); });
+  return v;
+}
+
 function searchRows(d, match, long, short, lo, hi, f) {
   if (!long.length) {
     // short words only (all built): walk the rarest word's hit list, newest first
@@ -495,7 +538,7 @@ function searchRows(d, match, long, short, lo, hi, f) {
     for (const w of terms.filter(w => w !== t)) { cond.push("n.content LIKE ? ESCAPE '\\'"); args.push(likeArg(w)); }
     return d.prepare(`SELECT n.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM short_hits h JOIN notes n ON n.rowid = h.rowid_
       WHERE h.term = ? AND h.rowid_ BETWEEN ? AND ? AND ${cond.join(' AND ')}
-      ORDER BY h.rowid_ DESC LIMIT ${PAGE * 2}`).all(...args);
+      ORDER BY h.rowid_ DESC LIMIT ${BLOCK + 10}`).all(...args);
   }
   const cond = ['n.nsfw = 0'], args = [];
   if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
@@ -511,12 +554,33 @@ function searchRows(d, match, long, short, lo, hi, f) {
     const likes = long.map(() => "n.content LIKE ? ESCAPE '\\'");
     return d.prepare(`SELECT n.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM notes n INDEXED BY ${direct}
       WHERE n.rowid BETWEEN ? AND ? AND ${[...cond, ...likes].join(' AND ')}
-      ORDER BY ${direct === 'notes_author' ? 'n.created_at DESC, n.rowid DESC' : 'n.kind DESC, n.rowid DESC'} LIMIT ${PAGE * 2}`)
+      ORDER BY ${direct === 'notes_author' ? 'n.created_at DESC, n.rowid DESC' : 'n.kind DESC, n.rowid DESC'} LIMIT ${BLOCK + 10}`)
       .all(lo, hi, ...args, ...long.map(likeArg));
   }
   return d.prepare(`SELECT f.rowid r, lower(hex(n.id)) id, lower(hex(n.pubkey)) pk FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
       WHERE notes_fts MATCH ? AND f.rowid BETWEEN ? AND ? AND ${cond.join(' AND ')}
-      ORDER BY f.rowid DESC LIMIT ${PAGE * 2}`).all(match, lo, hi, ...args);
+      ORDER BY f.rowid DESC LIMIT ${BLOCK + 10}`).all(match, lo, hi, ...args);
+}
+// total for the sqlite search (same conditions as searchRows, without the cursor); capped like the NIP-50 count
+function searchCountSql(d, match, long, short, lo, hi, f) {
+  const cap = `LIMIT ${SEARCH_COUNT_CAP}`;
+  if (!long.length) {
+    const terms = short.map(w => w.replace(/[A-Z]/g, c => c.toLowerCase()));
+    const counts = terms.map(t => d.prepare('SELECT hits FROM short_terms WHERE term = ?').get(t)?.hits ?? 0);
+    const t = terms[counts.indexOf(Math.min(...counts))];
+    const cond = ['n.nsfw = 0'], args = [t, lo, hi];
+    if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
+    if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
+    for (const w of terms.filter(w => w !== t)) { cond.push("n.content LIKE ? ESCAPE '\\'"); args.push(likeArg(w)); }
+    return d.prepare(`SELECT count(*) c FROM (SELECT 1 FROM short_hits h JOIN notes n ON n.rowid = h.rowid_
+      WHERE h.term = ? AND h.rowid_ BETWEEN ? AND ? AND ${cond.join(' AND ')} ${cap})`).get(...args).c;
+  }
+  const cond = ['n.nsfw = 0'], args = [];
+  if (f.author) { cond.push('n.pubkey = unhex(?)'); args.push(f.author); }
+  if (f.kind) cond.push(`n.kind = ${f.kind === 'note' ? 1 : 30023}`);
+  for (const w of short) { cond.push("n.content LIKE ? ESCAPE '\\'"); args.push(likeArg(w)); }
+  return d.prepare(`SELECT count(*) c FROM (SELECT 1 FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
+      WHERE notes_fts MATCH ? AND f.rowid BETWEEN ? AND ? AND ${cond.join(' AND ')} ${cap})`).get(match, lo, hi, ...args).c;
 }
 const hasIndex = (d, name) => cached('ix:' + name + dbIno, 600_000, () => !!d.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?").get(name));   // search-index.py: rowid = created_at << 20 | id bits
 
@@ -525,7 +589,7 @@ const hasIndex = (d, name) => cached('ix:' + name + dbIno, 600_000, () => !!d.pr
 const KIND_SETS = { note: [1], article: [30023], chat: [40, 41, 42], all: [1, 30023, 40, 41, 42] };
 const KIND_LABEL = { note: 'notes only', article: 'articles only', chat: 'chat only' };
 async function searchRowsNip50(q, f, cursor) {
-  const base = { search: q, kinds: KIND_SETS[f.kind || 'all'], limit: PAGE * 2 };
+  const base = { search: q, kinds: KIND_SETS[f.kind || 'all'], limit: BLOCK + 10 };
   if (f.since) base.since = f.since;
   const until = Math.min(f.until || Infinity, cursor ? cursor : Infinity);
   if (until !== Infinity) base.until = until;
@@ -556,10 +620,20 @@ async function searchPageNip50(q, sp) {
   }
   const seen = new Set(sp.getAll('seen'));
   const sorted = [...evs].sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1));
-  const shownAll = sorted.filter(e => !seen.has(e.id) && visible(e));
+  const shownAll = sorted.filter(e => !seen.has(e.id) && visible(e)).slice(0, BLOCK);
+  const pages = Math.max(1, Math.ceil(shownAll.length / PAGE));
+  const pg = Math.min(Math.max(1, +(sp.get('pg') || 1) || 1), pages);
+  const blockNo = Math.max(0, +(sp.get('b') || 0) || 0), offset = Math.max(0, +(sp.get('o') || 0) || 0);
+  // total for the query + filters (not the cursor); first call can take seconds on common words, later pages reuse it
+  const cntKey = JSON.stringify([q, f.since, f.until, f.author, f.kind]);
+  const cntFilter = { search: q, kinds: KIND_SETS[f.kind || 'all'], ...(f.since ? { since: f.since } : {}), ...(f.until ? { until: f.until } : {}), ...(f.author ? { authors: [f.author] } : {}) };
+  // started after the results are in (a parallel COUNT on the same connection slows the search down); short wait,
+  // then the page shows "counting…" and fills it in from /search?count=
+  const cntP = searchCount(cntKey, () => count(cntFilter));
+  const total = await Promise.race([cntP, new Promise(r => setTimeout(() => r(undefined), 300))]);
   // strfry removes events deleted by their author (NIP-09) on write, but check in one REQ in case a deletion
   // arrived before the event (some relays sync in that order)
-  const cand = shownAll.slice(0, PAGE + 10);
+  const cand = shownAll.slice((pg - 1) * PAGE, pg * PAGE + 10);
   const dels = cand.length ? await req({ kinds: [5], '#e': cand.map(e => e.id), limit: cand.length * 2 }) : [];
   const deleted = new Set(dels.flatMap(d => d.tags.filter(t => t[0] === 'e' && cand.some(e => e.id === t[1] && e.pubkey === d.pubkey)).map(t => t[1])));
   const notes = cand.filter(e => !deleted.has(e.id)).slice(0, PAGE);
@@ -572,16 +646,29 @@ async function searchPageNip50(q, sp) {
   const active = [f.since && 'from ' + ymd(f.since), f.until && 'to ' + ymd(f.until),
     f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && KIND_LABEL[f.kind]].filter(Boolean).join(' · ');
   if (!notes.length && !people.length) return fail(`No results for <b>${esc(q)}</b>${active ? ' (' + active + ')' : ''}.`);
-  let more = '';
-  if (evs.length >= PAGE && notes.length) {
-    const last = notes[notes.length - 1];
-    const sameSecond = notes.filter(e => e.created_at === last.created_at).map(e => e.id);
-    more = `<div class="pager"><span></span><a href="/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: last.created_at })}${sameSecond.map(id => '&seen=' + id).join('')}" rel="nofollow">older →</a></div>`;
+  // next block starts after the last event of this block (same-second events already shown are passed as seen ids)
+  let nextBlock = '';
+  if (evs.length >= BLOCK && shownAll.length) {
+    const last = shownAll[shownAll.length - 1];
+    const sameSecond = shownAll.filter(e => e.created_at === last.created_at).map(e => e.id);
+    nextBlock = `/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: last.created_at, b: blockNo + 1, o: offset + pages })}${sameSecond.map(id => '&seen=' + id).join('')}`;
   }
-  const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''} · newest first · ${ms} ms</p>
+  const cursorArgs = cursor ? { cursor, b: blockNo, o: offset } : {};
+  const more = pages > 1 || nextBlock || blockNo ? pagerHtml(q, f, { pg, pages, cursorArgs, nextBlock, blockNo, offset, seen: cursor ? [...seen].filter(id => /^[0-9a-f]{64}$/.test(id)) : [] }) : '';
+  const totalTxt = total ? countText(total) : total === null ? '' : '<span id="cnt" data-k="' + esc(cntKey) + '">counting…</span>';
+  const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''}${totalTxt ? ' · ' + totalTxt : ''} · newest first · page ${offset + pg} · ${ms} ms</p>
 ${people.length ? `<div class="card"><div class="hint" style="margin-bottom:6px">People</div>${people.map(pk => whoHtml(pk, profs[pk])).join('')}</div>` : ''}
-${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
+${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}${totalTxt.includes('id="cnt"') ? COUNT_JS : ''}`;
   return page({ title, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
+}
+// fills in "counting…" once the relay's COUNT finishes (asks /search?count=<key>, which waits for the cached promise)
+const COUNT_JS = `<script>(async()=>{const el=document.getElementById('cnt');if(!el)return;
+try{const r=await fetch('/search?count='+encodeURIComponent(el.dataset.k));const j=await r.json();el.textContent=j.text||'';}catch(e){el.textContent='';}})()</script>`;
+async function countLater(key) {
+  const c = cache.get('cnt:' + key);
+  if (!c) return { text: '' };
+  const v = await Promise.race([c.v, new Promise(r => setTimeout(() => r(null), 30000))]);
+  return { text: countText(v) };
 }
 
 // /search with no words: the search form (filters kept from the URL), 200 so links to /search work
@@ -627,11 +714,22 @@ async function searchPage(q, sp) {
     rows = cached('sq:' + JSON.stringify([match, short, lo, hi, f.author, f.kind]), 60_000, () => searchRows(d, match, long, short, lo, hi, f));
   } catch (err) { console.error(new Date().toISOString(), 'search', err.message); return fail('Bad query.'); }
   const ban = bans();
-  rows = rows.filter(r => !ban.has(r.pk));
-  const ids = rows.slice(0, PAGE + 10).map(r => r.id);
+  const fetched = rows.length;
+  rows = rows.filter(r => !ban.has(r.pk)).slice(0, BLOCK);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const pg = Math.min(Math.max(1, +(sp.get('pg') || 1) || 1), pages);
+  const blockNo = Math.max(0, +(sp.get('b') || 0) || 0), offset = Math.max(0, +(sp.get('o') || 0) || 0);
+  const flo = f.since ? f.since * ROWID_SHIFT : 0, fhi = f.until ? (f.until + 1) * ROWID_SHIFT - 1 : Number.MAX_SAFE_INTEGER;
+  let total = null;
+  try { total = cached('sc:' + JSON.stringify([match, short, flo, fhi, f.author, f.kind]), 600_000, () => ({ count: searchCountSql(d, match, long, short, flo, fhi, f) })); }
+  catch (err) { console.error(new Date().toISOString(), 'search count', err.message); }
+  // the index can still list events the relay no longer has (removed by the operator, expired): those are skipped,
+  // so a page can come out short; the rest of the block is unaffected
+  const slice = rows.slice((pg - 1) * PAGE, pg * PAGE);
+  const ids = slice.map(r => r.id);
   const evs = ids.length ? await req({ ids }) : [];
   const byId = Object.fromEntries(evs.map(e => [e.id, e]));
-  const shown = rows.slice(0, PAGE + 10).filter(r => byId[r.id] && visible(byId[r.id])).slice(0, PAGE);
+  const shown = slice.filter(r => byId[r.id] && visible(byId[r.id]));
   const notes = shown.map(r => byId[r.id]);
   // people whose names match (only on the first, unfiltered-by-author page)
   const profRows = cursor || f.author || !long.length ? [] : d.prepare(`SELECT lower(hex(p.pubkey)) pk FROM profiles_fts f JOIN profiles p ON p.rowid = f.rowid
@@ -642,8 +740,10 @@ async function searchPage(q, sp) {
   const active = [f.since && 'from ' + ymd(f.since), f.until && 'to ' + ymd(f.until),
     f.author && 'by ' + esc(nameOf(f.author, profs[f.author].p)), f.kind && KIND_LABEL[f.kind]].filter(Boolean).join(' · ');
   if (!notes.length && !people.length) return fail(`No results for <b>${esc(q)}</b>${active ? ' (' + active + ')' : ''}.`);
-  const more = rows.length >= PAGE && shown.length ? `<div class="pager"><span></span><a href="/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: shown[shown.length - 1].r })}" rel="nofollow">older →</a></div>` : '';
-  const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''} · newest first · ${ms} ms</p>
+  const nextBlock = fetched >= BLOCK && rows.length ? `/search/${encodeURIComponent(q)}${filterQuery(f, { cursor: rows[rows.length - 1].r, b: blockNo + 1, o: offset + pages })}` : '';
+  const more = pages > 1 || nextBlock || blockNo ? pagerHtml(q, f, { pg, pages, cursorArgs: cursor ? { cursor, b: blockNo, o: offset } : {}, nextBlock, blockNo, offset }) : '';
+  const totalTxt = countText(total);
+  const body = `${filterForm(q, f)}${head}${active ? ' · ' + active : ''}${totalTxt ? ' · ' + totalTxt : ''} · newest first · page ${offset + pg} · ${ms} ms</p>
 ${people.length ? `<div class="card"><div class="hint" style="margin-bottom:6px">People</div>${people.map(pk => whoHtml(pk, profs[pk])).join('')}</div>` : ''}
 ${notes.map(e => noteCard(e, profs[e.pubkey], q)).join('')}${more}`;
   return page({ title, desc: `Nostr notes matching "${q}" on ${RELAY_NAME}`, robots: 'noindex,follow', q, body });
@@ -763,6 +863,9 @@ async function route(u, ip) {
   }
   if (p === '/sitemap.xml') return cached('sm', 3600_000, () => sitemap(null));
   if ((m = p.match(/^\/sitemap-(\d+|profiles)\.xml$/))) return cached('sm' + m[1], 3600_000, () => sitemap(m[1] === 'profiles' ? 'profiles' : +m[1]));
+  if (p === '/search' && u.searchParams.has('count')) {
+    return [200, JSON.stringify(await countLater(String(u.searchParams.get('count')).slice(0, 600))), 'application/json; charset=utf-8'];
+  }
   if (p === '/search' && u.searchParams.has('suggest')) {
     const r = await suggestAuthors(u.searchParams.get('suggest') || '');
     return [200, JSON.stringify(r), 'application/json; charset=utf-8'];
@@ -791,7 +894,7 @@ http.createServer(async (rq, rs) => {
   let u;
   try { u = new URL(rq.url, BASE); } catch { rs.writeHead(400).end(); return; }
   if (rq.method !== 'GET' && rq.method !== 'HEAD') { rs.writeHead(405).end(); return; }
-  const suggest = u.pathname === '/search' && u.searchParams.has('suggest');
+  const suggest = u.pathname === '/search' && (u.searchParams.has('suggest') || u.searchParams.has('count'));
   if (limited(ip, suggest ? 1 : u.pathname.startsWith('/search') ? 4 : 1)) {
     rs.writeHead(429, { 'content-type': 'text/plain', 'retry-after': '60' }).end('Too many requests'); return;
   }

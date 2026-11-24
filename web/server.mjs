@@ -108,10 +108,14 @@ async function count(filter, ms = 25000) {
 }
 const countPending = new Map();
 async function req(...filters) {
+  return reqT(8000, ...filters);
+}
+// REQ with its own time limit; on timeout the events so far are returned with .timedOut set (callers must not cache it)
+async function reqT(ms, ...filters) {
   await relay();
   const id = 'w' + (++subSeq);
   return new Promise(res => {
-    const p = { events: [], res, t: setTimeout(() => { pending.delete(id); res(p.events); }, 8000) };
+    const p = { events: [], res, t: setTimeout(() => { pending.delete(id); try { ws.send(JSON.stringify(['CLOSE', id])); } catch {} p.events.timedOut = true; res(p.events); }, ms) };
     pending.set(id, p);
     ws.send(JSON.stringify(['REQ', id, ...filters]));
   });
@@ -594,8 +598,9 @@ async function searchRowsNip50(q, f, cursor) {
   const until = Math.min(f.until || Infinity, cursor ? cursor : Infinity);
   if (until !== Infinity) base.until = until;
   if (f.author) base.authors = [f.author];
-  const evs = await req(base);
+  const evs = await reqT(25000, base);
   if (evs.closed) throw new Error(evs.closed);
+  if (evs.timedOut && evs.length < BLOCK) throw new Error('search timed out');
   return evs;
 }
 
@@ -616,7 +621,8 @@ async function searchPageNip50(q, sp) {
   } catch (err) {
     cache.delete('n5:' + JSON.stringify([q, f.since, f.until, f.author, f.kind, cursor]));
     console.error(new Date().toISOString(), 'search', err.message);
-    return fail(/no searchable terms/.test(err.message) ? 'Please enter words to search for.' : 'Bad query.');
+    return fail(/no searchable terms/.test(err.message) ? 'Please enter words to search for.'
+      : /timed out/.test(err.message) ? 'The search took too long (very common words are slow the first time). Please try again in a moment, or add a word or a date range.' : 'Bad query.');
   }
   const seen = new Set(sp.getAll('seen'));
   const sorted = [...evs].sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1));
